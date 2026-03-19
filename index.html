@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebM7</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<h1 class="site-title">WebM7 — FM-7 Web Emulator</h1>
+
+<div class="main-layout">
+
+    <!-- Left: Screen + Toolbar -->
+    <div class="left-col">
+        <div class="screen-container" id="screenContainer">
+            <canvas id="screen" width="640" height="200"></canvas>
+            <div class="scanlines"></div>
+        </div>
+        <div class="toolbar">
+            <div class="toolbar-group">
+                <button id="muteBtn" title="Mute/Unmute">VOL</button>
+                <input type="range" id="volumeSlider" min="0" max="100" value="50">
+                <span class="vol-label" id="volLabel">50%</span>
+            </div>
+            <div class="toolbar-group">
+                <span class="vol-label" id="fpsLabel">--</span>
+                <span class="vol-label" id="tbKeyLabel">--</span>
+                <button id="inputPanelBtn" title="Input Monitor">INPUT</button>
+                <button id="fullscreenBtn" title="Fullscreen (F11)">FULL</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right: Side Panel -->
+    <div class="side-panel">
+
+        <!-- Control -->
+        <div class="sp-section">
+            <h3>Control</h3>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+                <label style="margin:0;">Boot:</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="bootMode" value="dos" checked> DOS</label>
+                    <label><input type="radio" name="bootMode" value="basic"> BASIC</label>
+                </div>
+            </div>
+            <div class="btn-row">
+                <button id="startBtn" class="btn-start">Start</button>
+                <button id="stopBtn" class="btn-stop" disabled>Stop</button>
+                <button id="resetBtn" class="btn-reset">Reset</button>
+            </div>
+        </div>
+
+        <!-- ROM Files -->
+        <div class="sp-section">
+            <h3>ROM Files</h3>
+            <label>Folder:</label>
+            <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
+                <input type="file" id="romFolder" webkitdirectory multiple>
+                <span class="status-tag" id="romStatus">--</span>
+            </div>
+            <label>Individual:</label>
+            <div class="rom-list">
+                <div class="rom-item">
+                    <span class="rom-name">fbasic30.rom</span>
+                    <input type="file" id="romFBasic" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusFBasic">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">boot_dos.rom</span>
+                    <input type="file" id="romBootDos" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusBootDos">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">subsys_c.rom</span>
+                    <input type="file" id="romSubSys" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusSubSys">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">SUBSYSCG.ROM</span>
+                    <input type="file" id="romCG" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusCG">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Disk -->
+        <div class="sp-section">
+            <h3>Disk Image</h3>
+            <label>Drive 0:</label>
+            <div style="display:flex;align-items:center;gap:4px;">
+                <input type="file" id="diskFile" accept=".d77,.D77,.2d,.2D">
+                <span class="status-tag" id="diskStatus">--</span>
+            </div>
+        </div>
+
+        <!-- Debug -->
+        <div class="sp-section">
+            <h3>Debug</h3>
+            <div class="debug-grid">
+                <span class="d-label">State</span><span class="d-val" id="stateVal">Stopped</span>
+                <span class="d-label">FPS</span><span class="d-val" id="fpsVal">--</span>
+                <span class="d-label">Main PC</span><span class="d-val" id="mainPCVal">----</span>
+                <span class="d-label">Sub PC</span><span class="d-val" id="subPCVal">----</span>
+                <span class="d-label">Sub CPU</span><span class="d-val" id="subStateVal">--</span>
+            </div>
+
+            <h3 style="margin-top:8px;">Keyboard</h3>
+            <div class="key-display" id="keyDisplay">--</div>
+
+            <h3 style="margin-top:8px;">Palette</h3>
+            <div class="palette-row" id="paletteRow"></div>
+
+            <h3 style="margin-top:8px;">PSG Registers</h3>
+            <div class="psg-regs" id="psgRegs"></div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Input Monitor Panel -->
+<div class="input-panel" id="inputPanel">
+    <div class="ip-header">
+        <span>Input Monitor</span>
+        <button class="ip-close" id="inputPanelClose">&times;</button>
+    </div>
+    <div class="ip-body">
+        <div class="ip-section">
+            <div class="ip-label">Held Keys</div>
+            <div class="ip-held-keys" id="ipHeldKeys">--</div>
+        </div>
+        <div class="ip-section">
+            <div class="ip-label">FM-7 Key</div>
+            <div class="ip-fm7key">
+                <span id="ipFm7Code">--</span>
+                <span class="ip-sublabel" id="ipFm7Buf">buf: 0</span>
+            </div>
+        </div>
+        <div class="ip-section">
+            <div class="ip-label">Joystick</div>
+            <div class="ip-joy-row">
+                <div class="ip-joy-dpad" id="ipJoyDpad">
+                    <span class="jp-u" id="jpU"></span>
+                    <span class="jp-l" id="jpL"></span>
+                    <span class="jp-c"></span>
+                    <span class="jp-r" id="jpR"></span>
+                    <span class="jp-d" id="jpD"></span>
+                </div>
+                <div class="ip-joy-btns">
+                    <span class="jp-btn" id="jpBtn0">1</span>
+                    <span class="jp-btn" id="jpBtn1">2</span>
+                </div>
+                <span class="ip-sublabel" id="ipJoyStatus">No gamepad</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="footer">&copy; <span id="copyrightYear">2026</span> <a href="https://x.com/7032" target="_blank" rel="noopener">7032</a> / Naomitsu Tsugiiwa · <a href="#" id="helpLink">マニュアル</a> · <a href="#" id="creditsLink">ライセンス等</a></div>
+
+<!-- Help Modal -->
+<div class="modal-overlay" id="helpModal">
+    <div class="modal-content">
+        <button class="modal-close" id="helpClose">&times;</button>
+
+        <h1>WebM7 — FM-7 Web Emulator</h1>
+        <p>ブラウザ上で動く FM-7 のエミュレータです。<br>
+        Windows版、Mac版等の著名なエミュレータ同様、必要なROMファイルは各自でご用意ください。</p>
+
+        <p style="color:#e8a848;font-size:0.85em;">※ 本エミュレータは教育・研究・保存目的で開発されたものです。使用にあたっては各自の責任で、関連する法律を遵守してください。</p>
+
+        <h2>使い方</h2>
+
+        <h3>1. ROMファイルを読み込む</h3>
+        <p>エミュレータの起動には以下の ROM ファイルが必要です（実機から吸い出したものを用意してください）。</p>
+        <table>
+        <tr><th>ファイル名</th><th>内容</th></tr>
+        <tr><td><code>fbasic30.rom</code></td><td>F-BASIC V3.0 ROM</td></tr>
+        <tr><td><code>boot_dos.rom</code></td><td>DOS ブート ROM</td></tr>
+        <tr><td><code>subsys_c.rom</code></td><td>サブシステム ROM</td></tr>
+        <tr><td><code>SUBSYSCG.ROM</code></td><td>キャラクタージェネレータ ROM</td></tr>
+        </table>
+        <p>読み込み方法は2通りあります。</p>
+        <ul>
+        <li><strong>フォルダ指定</strong> — 「Folder」で上記ファイルが入ったフォルダを選択</li>
+        <li><strong>個別指定</strong> — 各 ROM を1つずつファイル選択</li>
+        </ul>
+        <p>各 ROM の横に「OK」と表示されれば読み込み成功です。</p>
+
+        <h3>2. ディスクイメージをセットする（任意）</h3>
+        <p>D77 形式のディスクイメージを「Drive 0」にセットできます。</p>
+
+        <h3>3. 起動</h3>
+        <ol>
+        <li><strong>Boot Mode</strong> を選択（DOS / BASIC）</li>
+        <li><strong>Start</strong> ボタンを押す</li>
+        </ol>
+        <p>画面（Screen）をクリックするとキーボード入力がエミュレータに渡ります。</p>
+
+        <h2>画面の説明</h2>
+        <p>メイン画面は左右2カラムで構成されています。</p>
+
+        <h3>左側 — エミュレータ画面</h3>
+        <ul>
+        <li><strong>Screen</strong> — FM-7 の映像出力（640×200、スキャンライン付き）。クリックするとキーボード入力がエミュレータに渡ります。</li>
+        <li><strong>Toolbar</strong> — 画面下のバーに以下の機能があります。
+            <ul>
+            <li><strong>VOL</strong> / スライダー — 音量調整（ミュート切替可）</li>
+            <li><strong>FPS</strong> — 現在のフレームレート表示</li>
+            <li><strong>FM-7 Key</strong> — エミュレータに渡された最新のキーコード</li>
+            <li><strong>INPUT</strong> — Input Monitor パネルの開閉（後述）</li>
+            <li><strong>FULL</strong> / F11キー — フルスクリーン表示の切替</li>
+            </ul>
+        </li>
+        </ul>
+
+        <h3>右側 — サイドパネル</h3>
+        <table>
+        <tr><th>セクション</th><th>内容</th></tr>
+        <tr><td><strong>Control</strong></td><td>Boot Mode（DOS / BASIC）の選択と Start / Stop / Reset ボタン</td></tr>
+        <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功</td></tr>
+        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット</td></tr>
+        <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示、パレット、PSG レジスタ</td></tr>
+        </table>
+
+        <h2>Input Monitor</h2>
+        <p>ツールバーの <strong>INPUT</strong> ボタンで開閉するフローティングパネルです。</p>
+        <ul>
+        <li><strong>Held Keys</strong> — 現在ブラウザ上で押下中のキー一覧</li>
+        <li><strong>FM-7 Key</strong> — エミュレータに渡されたFM-7キーコード（16進数）とキーバッファ残数</li>
+        <li><strong>Joystick</strong> — ゲームパッドの方向（D-pad）とボタン状態をリアルタイム表示。PCのゲームパッドを接続すると自動認識され、FM-7のジョイスティックとして使用できます。</li>
+        </ul>
+
+        <h2>フルスクリーン</h2>
+        <p>ツールバーの <strong>FULL</strong> ボタンまたは <strong>F11</strong> キーでエミュレータ画面をフルスクリーン表示できます。もう一度押すと元に戻ります。</p>
+
+        <h2>ROMファイルについて</h2>
+        <p>ROMファイルの著作権は富士通株式会社に帰属します。不正に入手したROMの使用は著作権法に違反します。必ず実機から吸い出したものをご使用ください。</p>
+
+        <p style="font-size:0.75em;color:#6688aa;margin-top:20px;">「FM-7」「FUJITSU MICRO 7」「F-BASIC」は富士通株式会社の商標または登録商標です。本プロジェクトは富士通株式会社とは一切関係ありません。</p>
+
+        <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #2a2a4a;">
+            <button id="helpCloseBottom" style="padding:10px 48px;font-size:1.1em;font-weight:bold;background:linear-gradient(180deg,#e8c840,#c8a020);color:#1a1a2e;border:none;border-radius:6px;cursor:pointer;font-family:inherit;letter-spacing:0.05em;">閉じる</button>
+        </div>
+    </div>
+</div>
+
+<!-- Credits Modal -->
+<div class="modal-overlay" id="creditsModal">
+    <div class="modal-content">
+        <button class="modal-close" id="creditsClose">&times;</button>
+
+        <h1>クレジット</h1>
+
+        <h2>参考にさせて頂いた資料</h2>
+        <ul>
+        <li>Motorola MC6809 Programming Manual / Data Sheet</li>
+        <li>Fujitsu MB8877 Data Sheet</li>
+        <li>General Instrument AY-3-8910 Data Sheet</li>
+        <li>富士通 FM-7 テクニカルリファレンスマニュアル</li>
+        <li><a href="https://www.pc98.org/project/doc/d88.html" target="_blank" rel="noopener">D88 Disk Image Format Specification</a></li>
+        </ul>
+
+        <h2>謝辞</h2>
+        <p>以下のサイトを参考にさせて頂きました。</p>
+        <ul>
+        <li><a href="http://retropc.net/pi/xm7/" target="_blank" rel="noopener">XM7 - RetroPC</a></li>
+        <li><a href="https://xm7.na.coocan.jp/" target="_blank" rel="noopener">OREism III</a></li>
+        </ul>
+
+        <h2>ライセンス</h2>
+        <p style="font-size:0.8em;color:#8899aa;">本ライセンスはWebM7自体のソースコード（JavaScript, HTML, CSS）に適用されます。ROMデータや第三者の著作物は含まれません。</p>
+
+        <pre style="background:#1a1a2e;padding:16px;border-radius:6px;font-size:0.78em;color:#c8c8d0;white-space:pre-wrap;line-height:1.5;margin:12px 0;">MIT License
+
+Copyright (c) 2026 7032 / Naomitsu Tsugiiwa
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</pre>
+
+        <p style="font-size:0.75em;color:#6688aa;margin-top:20px;">「FM-7」「FUJITSU MICRO 7」「F-BASIC」は富士通株式会社の商標または登録商標です。本プロジェクトは富士通株式会社とは一切関係ありません。</p>
+
+        <div style="text-align:center;margin-top:24px;padding-top:16px;border-top:1px solid #2a2a4a;">
+            <button id="creditsCloseBottom" style="padding:10px 48px;font-size:1.1em;font-weight:bold;background:linear-gradient(180deg,#e8c840,#c8a020);color:#1a1a2e;border:none;border-radius:6px;cursor:pointer;font-family:inherit;letter-spacing:0.05em;">閉じる</button>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+import { FM7 } from './js/fm7.js';
+
+// =========================================================================
+// Initialization
+// =========================================================================
+
+const fm7 = new FM7();
+const canvas = document.getElementById('screen');
+const screenContainer = document.getElementById('screenContainer');
+
+// UI elements
+const romFolderInput  = document.getElementById('romFolder');
+const romFBasicInput  = document.getElementById('romFBasic');
+const romBootDosInput = document.getElementById('romBootDos');
+const romSubSysInput  = document.getElementById('romSubSys');
+const romCGInput      = document.getElementById('romCG');
+const diskFileInput   = document.getElementById('diskFile');
+const startBtn        = document.getElementById('startBtn');
+const stopBtn         = document.getElementById('stopBtn');
+const resetBtn        = document.getElementById('resetBtn');
+
+const romStatusEl     = document.getElementById('romStatus');
+const statusFBasicEl  = document.getElementById('statusFBasic');
+const statusBootDosEl = document.getElementById('statusBootDos');
+const statusSubSysEl  = document.getElementById('statusSubSys');
+const statusCGEl      = document.getElementById('statusCG');
+const diskStatusEl    = document.getElementById('diskStatus');
+const stateValEl      = document.getElementById('stateVal');
+const fpsValEl        = document.getElementById('fpsVal');
+const mainPCValEl     = document.getElementById('mainPCVal');
+const subPCValEl      = document.getElementById('subPCVal');
+const subStateValEl   = document.getElementById('subStateVal');
+
+const volumeSlider    = document.getElementById('volumeSlider');
+const volLabel        = document.getElementById('volLabel');
+const muteBtn         = document.getElementById('muteBtn');
+const fullscreenBtn   = document.getElementById('fullscreenBtn');
+const fpsLabel        = document.getElementById('fpsLabel');
+
+const keyDisplay      = document.getElementById('keyDisplay');
+const paletteRow      = document.getElementById('paletteRow');
+const psgRegsEl       = document.getElementById('psgRegs');
+
+// =========================================================================
+// Volume Control
+// =========================================================================
+
+let savedVolume = 0.5;
+let isMuted = false;
+
+const storedVol = localStorage.getItem('fm7_volume');
+if (storedVol !== null) {
+    savedVolume = parseFloat(storedVol);
+    volumeSlider.value = Math.round(savedVolume * 100);
+    volLabel.textContent = Math.round(savedVolume * 100) + '%';
+    fm7.psg.setVolume(savedVolume);
+}
+
+volumeSlider.addEventListener('input', () => {
+    const v = parseInt(volumeSlider.value) / 100;
+    savedVolume = v;
+    isMuted = false;
+    fm7.psg.setVolume(v);
+    volLabel.textContent = Math.round(v * 100) + '%';
+    muteBtn.textContent = v === 0 ? 'MUTE' : 'VOL';
+    localStorage.setItem('fm7_volume', v.toString());
+});
+
+muteBtn.addEventListener('click', () => {
+    isMuted = !isMuted;
+    if (isMuted) {
+        fm7.psg.setVolume(0);
+        muteBtn.textContent = 'MUTE';
+        volLabel.textContent = 'MUTE';
+    } else {
+        fm7.psg.setVolume(savedVolume);
+        muteBtn.textContent = 'VOL';
+        volLabel.textContent = Math.round(savedVolume * 100) + '%';
+    }
+});
+
+// =========================================================================
+// Fullscreen
+// =========================================================================
+
+function toggleFullscreen() {
+    if (document.fullscreenElement) {
+        document.exitFullscreen();
+    } else {
+        screenContainer.requestFullscreen().catch(() => {});
+    }
+}
+
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+document.addEventListener('keydown', (e) => {
+    if (e.code === 'F11') {
+        e.preventDefault();
+        toggleFullscreen();
+    }
+});
+
+// =========================================================================
+// ROM Loading - Folder
+// =========================================================================
+
+romFolderInput.addEventListener('change', async (e) => {
+    const files = e.target.files;
+    let loaded = 0;
+    for (const file of files) {
+        const name = file.name.toLowerCase();
+        try {
+            const data = await file.arrayBuffer();
+            if (name === 'fbasic30.rom') {
+                fm7.loadFBasicROM(data);
+                markLoaded(statusFBasicEl);
+                loaded++;
+            } else if (name === 'boot_dos.rom') {
+                fm7.loadBootROM(data);
+                markLoaded(statusBootDosEl);
+                loaded++;
+            } else if (name === 'subsys_c.rom') {
+                fm7.loadSubROM(data);
+                markLoaded(statusSubSysEl);
+                loaded++;
+            } else if (name === 'subsyscg.rom') {
+                fm7.loadCGROM(data);
+                markLoaded(statusCGEl);
+                loaded++;
+            }
+        } catch (err) {
+            console.error(`Failed to load ${file.name}:`, err);
+        }
+    }
+    if (loaded > 0) {
+        romStatusEl.textContent = `${loaded} ROM(s)`;
+        romStatusEl.classList.add('loaded');
+    }
+});
+
+// =========================================================================
+// ROM Loading - Individual
+// =========================================================================
+
+function setupIndividualROM(input, loaderFn, statusEl) {
+    input.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+            const data = await file.arrayBuffer();
+            loaderFn(data);
+            markLoaded(statusEl);
+        } catch (err) {
+            statusEl.textContent = 'Error';
+            console.error(`Failed to load ROM:`, err);
+        }
+    });
+}
+
+setupIndividualROM(romFBasicInput,  (d) => fm7.loadFBasicROM(d),  statusFBasicEl);
+setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosEl);
+setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl);
+setupIndividualROM(romCGInput,      (d) => fm7.loadCGROM(d),      statusCGEl);
+
+function markLoaded(el) {
+    el.textContent = 'OK';
+    el.classList.add('loaded');
+}
+
+// =========================================================================
+// Disk Loading
+// =========================================================================
+
+diskFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+        const data = await file.arrayBuffer();
+        const ok = fm7.loadDisk(0, data);
+        if (ok) {
+            diskStatusEl.textContent = file.name;
+            diskStatusEl.classList.add('loaded');
+        } else {
+            diskStatusEl.textContent = 'Fail';
+        }
+    } catch (err) {
+        diskStatusEl.textContent = 'Err';
+        console.error('Failed to load disk:', err);
+    }
+});
+
+// =========================================================================
+// Control Buttons
+// =========================================================================
+
+startBtn.addEventListener('click', () => {
+    const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
+    fm7.reset(bootMode);
+    fm7.start(canvas);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    stateValEl.textContent = 'Running';
+    stateValEl.style.color = '#00cc66';
+});
+
+stopBtn.addEventListener('click', () => {
+    fm7.stop();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    stateValEl.textContent = 'Stopped';
+    stateValEl.style.color = '#cc6666';
+});
+
+resetBtn.addEventListener('click', () => {
+    const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
+    fm7.reset(bootMode);
+    if (!fm7._running) {
+        fm7.start(canvas);
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+    }
+    stateValEl.textContent = 'Running';
+    stateValEl.style.color = '#00cc66';
+});
+
+// =========================================================================
+// Debug: Palette Swatches
+// =========================================================================
+
+const PALETTE_COLORS = [
+    '#000000', '#0000ff', '#ff0000', '#ff00ff',
+    '#00ff00', '#00ffff', '#ffff00', '#ffffff',
+];
+
+for (let i = 0; i < 8; i++) {
+    const sw = document.createElement('div');
+    sw.className = 'pal-swatch';
+    sw.id = 'pal' + i;
+    sw.style.background = PALETTE_COLORS[i];
+    paletteRow.appendChild(sw);
+}
+
+// =========================================================================
+// Debug: PSG Register Display
+// =========================================================================
+
+// Header row
+for (let i = 0; i < 8; i++) {
+    const hdr = document.createElement('span');
+    hdr.className = 'pr-hdr';
+    hdr.textContent = 'R' + i;
+    psgRegsEl.appendChild(hdr);
+}
+// Value row (first 8 regs)
+for (let i = 0; i < 8; i++) {
+    const val = document.createElement('span');
+    val.className = 'pr-val';
+    val.id = 'psg' + i;
+    val.textContent = '00';
+    psgRegsEl.appendChild(val);
+}
+// Header row 2
+for (let i = 8; i < 16; i++) {
+    const hdr = document.createElement('span');
+    hdr.className = 'pr-hdr';
+    hdr.textContent = 'R' + (i < 10 ? i : String.fromCharCode(55 + i));
+    psgRegsEl.appendChild(hdr);
+}
+// Value row 2
+for (let i = 8; i < 16; i++) {
+    const val = document.createElement('span');
+    val.className = 'pr-val';
+    val.id = 'psg' + i;
+    val.textContent = '00';
+    psgRegsEl.appendChild(val);
+}
+
+// =========================================================================
+// Debug: Keyboard Display
+// =========================================================================
+
+let lastKeyCode = '--';
+document.addEventListener('keydown', (e) => {
+    const code = e.code;
+    lastKeyCode = code;
+    keyDisplay.textContent = code;
+});
+
+// =========================================================================
+// Status Update Timer
+// =========================================================================
+
+setInterval(() => {
+    const status = fm7.getStatus();
+    fpsValEl.textContent = status.running ? status.fps : '--';
+    fpsLabel.textContent = status.running ? status.fps + ' fps' : '--';
+    mainPCValEl.textContent = '$' + status.mainPC.toString(16).toUpperCase().padStart(4, '0');
+    subPCValEl.textContent = '$' + status.subPC.toString(16).toUpperCase().padStart(4, '0');
+    subStateValEl.textContent = status.subHalted ? 'HALT' : 'RUN';
+    subStateValEl.style.color = status.subHalted ? '#cc6666' : '#00cc66';
+
+    // Update palette swatches
+    for (let i = 0; i < 8; i++) {
+        const mapped = fm7.display.palette[i] & 7;
+        document.getElementById('pal' + i).style.background = PALETTE_COLORS[mapped];
+    }
+
+    // Update PSG registers
+    for (let i = 0; i < 16; i++) {
+        document.getElementById('psg' + i).textContent =
+            fm7.psg.regs[i].toString(16).toUpperCase().padStart(2, '0');
+    }
+}, 500);
+
+// =========================================================================
+// Canvas focus
+// =========================================================================
+
+canvas.addEventListener('click', () => {
+    canvas.focus();
+});
+canvas.setAttribute('tabindex', '0');
+
+// =========================================================================
+// Input Monitor Panel
+// =========================================================================
+
+const inputPanel = document.getElementById('inputPanel');
+const inputPanelBtn = document.getElementById('inputPanelBtn');
+const tbKeyLabel = document.getElementById('tbKeyLabel');
+const ipHeldKeys = document.getElementById('ipHeldKeys');
+const ipFm7Code = document.getElementById('ipFm7Code');
+const ipFm7Buf = document.getElementById('ipFm7Buf');
+const ipJoyStatus = document.getElementById('ipJoyStatus');
+
+inputPanelBtn.addEventListener('click', () => {
+    inputPanel.classList.toggle('open');
+    inputPanelBtn.classList.toggle('active');
+});
+document.getElementById('inputPanelClose').addEventListener('click', () => {
+    inputPanel.classList.remove('open');
+    inputPanelBtn.classList.remove('active');
+});
+
+// Track held browser keys for display
+const heldBrowserKeys = new Set();
+document.addEventListener('keydown', (e) => {
+    heldBrowserKeys.add(e.code);
+});
+document.addEventListener('keyup', (e) => {
+    heldBrowserKeys.delete(e.code);
+});
+
+// Gamepad polling
+function pollGamepad() {
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let gp = null;
+    for (const g of gamepads) {
+        if (g && g.connected) { gp = g; break; }
+    }
+
+    const jpU = document.getElementById('jpU');
+    const jpD = document.getElementById('jpD');
+    const jpL = document.getElementById('jpL');
+    const jpR = document.getElementById('jpR');
+    const jpBtn0 = document.getElementById('jpBtn0');
+    const jpBtn1 = document.getElementById('jpBtn1');
+
+    if (!gp) {
+        ipJoyStatus.textContent = 'No gamepad';
+        jpU.classList.remove('active');
+        jpD.classList.remove('active');
+        jpL.classList.remove('active');
+        jpR.classList.remove('active');
+        jpBtn0.classList.remove('active');
+        jpBtn1.classList.remove('active');
+        return;
+    }
+
+    ipJoyStatus.textContent = gp.id.substring(0, 16);
+
+    // Axes (typically axis 0 = X, axis 1 = Y)
+    const ax = gp.axes[0] || 0;
+    const ay = gp.axes[1] || 0;
+    const threshold = 0.5;
+    jpL.classList.toggle('active', ax < -threshold);
+    jpR.classList.toggle('active', ax > threshold);
+    jpU.classList.toggle('active', ay < -threshold);
+    jpD.classList.toggle('active', ay > threshold);
+
+    // Buttons
+    jpBtn0.classList.toggle('active', gp.buttons[0] && gp.buttons[0].pressed);
+    jpBtn1.classList.toggle('active', gp.buttons[1] && gp.buttons[1].pressed);
+}
+
+// Input monitor update (faster than debug, 100ms)
+setInterval(() => {
+    // Toolbar: latest FM-7 key code
+    const fmKey = fm7.keyboard.currentKey();
+    if (fmKey !== undefined && fmKey !== 0) {
+        const hex = '$' + fmKey.toString(16).toUpperCase().padStart(2, '0');
+        tbKeyLabel.textContent = hex;
+    }
+
+    // Panel updates only when visible
+    if (inputPanel.classList.contains('open')) {
+        // Held keys
+        if (heldBrowserKeys.size > 0) {
+            ipHeldKeys.textContent = Array.from(heldBrowserKeys).join(' ');
+        } else {
+            ipHeldKeys.textContent = '--';
+        }
+
+        // FM-7 key code + buffer
+        if (fmKey !== undefined && fmKey !== 0) {
+            const hex = '$' + fmKey.toString(16).toUpperCase().padStart(2, '0');
+            const ch = (fmKey >= 0x20 && fmKey <= 0x7E) ? " '" + String.fromCharCode(fmKey) + "'" : '';
+            ipFm7Code.textContent = hex + ch;
+        } else {
+            ipFm7Code.textContent = '--';
+        }
+        ipFm7Buf.textContent = 'buf: ' + fm7.keyboard.bufferCount();
+
+        // Gamepad
+        pollGamepad();
+    }
+}, 100);
+
+// =========================================================================
+// Help modal
+// =========================================================================
+
+const helpModal = document.getElementById('helpModal');
+document.getElementById('helpLink').addEventListener('click', (e) => {
+    e.preventDefault();
+    helpModal.querySelector('.modal-content').scrollTop = 0;
+    helpModal.classList.add('open');
+});
+function closeHelp() {
+    helpModal.classList.remove('open');
+    helpModal.querySelector('.modal-content').scrollTop = 0;
+}
+document.getElementById('helpClose').addEventListener('click', closeHelp);
+document.getElementById('helpCloseBottom').addEventListener('click', closeHelp);
+helpModal.addEventListener('click', (e) => {
+    if (e.target === helpModal) closeHelp();
+});
+
+// Auto-open help on page load
+helpModal.classList.add('open');
+
+// =========================================================================
+// Credits modal
+// =========================================================================
+
+const creditsModal = document.getElementById('creditsModal');
+document.getElementById('creditsLink').addEventListener('click', (e) => {
+    e.preventDefault();
+    creditsModal.querySelector('.modal-content').scrollTop = 0;
+    creditsModal.classList.add('open');
+});
+function closeCredits() {
+    creditsModal.classList.remove('open');
+    creditsModal.querySelector('.modal-content').scrollTop = 0;
+}
+document.getElementById('creditsClose').addEventListener('click', closeCredits);
+document.getElementById('creditsCloseBottom').addEventListener('click', closeCredits);
+creditsModal.addEventListener('click', (e) => {
+    if (e.target === creditsModal) closeCredits();
+});
+
+// =========================================================================
+// Copyright year
+// =========================================================================
+
+const year = new Date().getFullYear();
+document.getElementById('copyrightYear').textContent =
+    year > 2026 ? '2026-' + year : '2026';
+
+</script>
+</body>
+</html>
