@@ -389,6 +389,31 @@ button:disabled {
     color: #ffffff;
 }
 
+.footer-links {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.footer-links a {
+    color: #6688aa;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
+}
+
+.footer-links a:hover {
+    color: #ffffff;
+}
+
+.footer-repo {
+    font-size: 0.85em;
+    margin-left: 4px;
+}
+
 /* ===== Input Monitor Panel ===== */
 .input-panel {
     display: none;
