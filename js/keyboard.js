@@ -3,7 +3,7 @@
  *
  * The FM-7 keyboard encoder produces 7-bit key codes (not standard ASCII).
  * Main CPU accesses keyboard through I/O ports:
- *   $FD00 (read)  - bit 7: key data available (1=yes), bits 0-6: unused
+ *   $FD00 (read)  - bit 7: key data available (active low: 0=yes, 1=no)
  *   $FD01 (read)  - key code (7-bit); reading clears the interrupt flag
  *   $FD02 (write) - bit 0: keyboard IRQ mask (0=enabled, 1=masked)
  *
@@ -24,37 +24,34 @@
 
 const FM7_KEY_NONE    = 0xFF;  // sentinel: no key
 
-// Printable / common codes (match ASCII for convenience)
-const FM7_KEY_SPACE   = 0x20;
-const FM7_KEY_RETURN  = 0x0D;
-const FM7_KEY_ESC     = 0x1B;
-const FM7_KEY_BS      = 0x08;
-const FM7_KEY_TAB     = 0x09;
-const FM7_KEY_DEL     = 0x7F;
+// FM-7 hardware scan codes (key matrix positions)
+const FM7_KEY_SPACE   = 0x35;
+const FM7_KEY_RETURN  = 0x1D;
+const FM7_KEY_ESC     = 0x01;
+const FM7_KEY_BS      = 0x0F;
+const FM7_KEY_TAB     = 0x10;
+const FM7_KEY_DEL     = 0x4B;
 
-// Arrow keys (FM-7 native codes)
-const FM7_KEY_LEFT    = 0x1D;
-const FM7_KEY_RIGHT   = 0x1C;
-const FM7_KEY_UP      = 0x1E;
-const FM7_KEY_DOWN    = 0x1F;
+// Arrow keys (hardware scan codes)
+const FM7_KEY_LEFT    = 0x4F;
+const FM7_KEY_RIGHT   = 0x51;
+const FM7_KEY_UP      = 0x4D;
+const FM7_KEY_DOWN    = 0x50;
 
 // Home / Cls
-const FM7_KEY_HOME    = 0x0B;  // HOME/CLS
+const FM7_KEY_HOME    = 0x4B;  // HOME → same as DEL scan code
 
-// Function keys F1-F10 (FM-7 codes 0x101-0x10A mapped to internal IDs,
-// but FM-7 actually sends these as multi-byte sequences via the key
-// encoder.  For simplicity we use the PF key codes that F-BASIC
-// recognises when read in raw mode.)
-const FM7_KEY_F1      = 0x01;
-const FM7_KEY_F2      = 0x02;
-const FM7_KEY_F3      = 0x03;
-const FM7_KEY_F4      = 0x04;
-const FM7_KEY_F5      = 0x05;
-const FM7_KEY_F6      = 0x06;
-const FM7_KEY_F7      = 0x07;
-const FM7_KEY_F8      = 0x0E;
-const FM7_KEY_F9      = 0x0F;
-const FM7_KEY_F10     = 0x10;
+// Function keys PF1-PF10 (hardware scan codes)
+const FM7_KEY_F1      = 0x57;
+const FM7_KEY_F2      = 0x58;
+const FM7_KEY_F3      = 0x59;
+const FM7_KEY_F4      = 0x5A;
+const FM7_KEY_F5      = 0x5B;
+const FM7_KEY_F6      = 0x5C;
+const FM7_KEY_F7      = 0x5D;
+const FM7_KEY_F8      = 0x5E;
+const FM7_KEY_F9      = 0x5F;
+const FM7_KEY_F10     = 0x60;
 
 // Break flag for key-up (release) events
 const FM7_KEY_BREAK   = 0x80;
@@ -63,9 +60,13 @@ const FM7_KEY_BREAK   = 0x80;
 // PC key (KeyboardEvent.code) -> FM-7 key code mapping
 // =====================================================================
 
-/** Map from KeyboardEvent.code to FM-7 key code (unshifted). */
-const CODE_TO_FM7 = new Map([
-    // Letters (FM-7 uses uppercase ASCII codes even without shift)
+/**
+ * FM-7 mode: ASCII-based key codes.
+ * The FM-7 keyboard encoder converts scan codes to ASCII internally.
+ * $FD01 returns ASCII character codes.
+ */
+const CODE_TO_FM7_ASCII = new Map([
+    // Letters (FM-7 returns uppercase ASCII)
     ['KeyA', 0x41], ['KeyB', 0x42], ['KeyC', 0x43], ['KeyD', 0x44],
     ['KeyE', 0x45], ['KeyF', 0x46], ['KeyG', 0x47], ['KeyH', 0x48],
     ['KeyI', 0x49], ['KeyJ', 0x4A], ['KeyK', 0x4B], ['KeyL', 0x4C],
@@ -73,71 +74,101 @@ const CODE_TO_FM7 = new Map([
     ['KeyQ', 0x51], ['KeyR', 0x52], ['KeyS', 0x53], ['KeyT', 0x54],
     ['KeyU', 0x55], ['KeyV', 0x56], ['KeyW', 0x57], ['KeyX', 0x58],
     ['KeyY', 0x59], ['KeyZ', 0x5A],
-
-    // Digits (top row)
+    // Digits
     ['Digit0', 0x30], ['Digit1', 0x31], ['Digit2', 0x32], ['Digit3', 0x33],
     ['Digit4', 0x34], ['Digit5', 0x35], ['Digit6', 0x36], ['Digit7', 0x37],
     ['Digit8', 0x38], ['Digit9', 0x39],
-
-    // Numpad digits
+    // Numpad
     ['Numpad0', 0x30], ['Numpad1', 0x31], ['Numpad2', 0x32], ['Numpad3', 0x33],
     ['Numpad4', 0x34], ['Numpad5', 0x35], ['Numpad6', 0x36], ['Numpad7', 0x37],
     ['Numpad8', 0x38], ['Numpad9', 0x39],
-
-    // Symbols (unshifted, US layout -> FM-7 JIS approximation)
-    ['Minus',        0x2D],  // -
-    ['Equal',        0x3D],  // = (FM-7: ^ on JIS, but we map = for usability)
-    ['BracketLeft',  0x5B],  // [
-    ['BracketRight', 0x5D],  // ]
-    ['Backslash',    0x5C],  // backslash
-    ['Semicolon',    0x3B],  // ;
-    ['Quote',        0x27],  // '
-    ['Backquote',    0x60],  // `
-    ['Comma',        0x2C],  // ,
-    ['Period',       0x2E],  // .
-    ['Slash',        0x2F],  // /
-
-    // Numpad operators
-    ['NumpadAdd',      0x2B],  // +
-    ['NumpadSubtract', 0x2D],  // -
-    ['NumpadMultiply', 0x2A],  // *
-    ['NumpadDivide',   0x2F],  // /
-    ['NumpadDecimal',  0x2E],  // .
-    ['NumpadEnter',    FM7_KEY_RETURN],
-
+    // Symbols
+    ['Minus', 0x2D], ['Equal', 0x3D], ['BracketLeft', 0x5B],
+    ['BracketRight', 0x5D], ['Backslash', 0x5C], ['Semicolon', 0x3B],
+    ['Quote', 0x27], ['Comma', 0x2C], ['Period', 0x2E], ['Slash', 0x2F],
+    ['NumpadAdd', 0x2B], ['NumpadSubtract', 0x2D], ['NumpadMultiply', 0x2A],
+    ['NumpadDivide', 0x2F], ['NumpadDecimal', 0x2E], ['NumpadEnter', 0x0D],
     // Control keys
-    ['Enter',      FM7_KEY_RETURN],
-    ['Space',      FM7_KEY_SPACE],
-    ['Escape',     FM7_KEY_ESC],
-    ['Backspace',  FM7_KEY_BS],
-    ['Tab',        FM7_KEY_TAB],
-    ['Delete',     FM7_KEY_DEL],
-    ['Home',       FM7_KEY_HOME],
-
+    ['Enter', 0x0D], ['Space', 0x20], ['Escape', 0x1B], ['Backspace', 0x08],
+    ['Tab', 0x09], ['Delete', 0x7F], ['Home', 0x0B],
     // Arrow keys
-    ['ArrowLeft',  FM7_KEY_LEFT],
-    ['ArrowRight', FM7_KEY_RIGHT],
-    ['ArrowUp',    FM7_KEY_UP],
-    ['ArrowDown',  FM7_KEY_DOWN],
-
+    ['ArrowLeft', 0x1D], ['ArrowRight', 0x1C], ['ArrowUp', 0x1E], ['ArrowDown', 0x1F],
     // Function keys
-    ['F1',  FM7_KEY_F1],
-    ['F2',  FM7_KEY_F2],
-    ['F3',  FM7_KEY_F3],
-    ['F4',  FM7_KEY_F4],
-    ['F5',  FM7_KEY_F5],
-    ['F6',  FM7_KEY_F6],
-    ['F7',  FM7_KEY_F7],
-    ['F8',  FM7_KEY_F8],
-    ['F9',  FM7_KEY_F9],
-    ['F10', FM7_KEY_F10],
+    ['F1', 0x01], ['F2', 0x02], ['F3', 0x03], ['F4', 0x04], ['F5', 0x05],
+    ['F6', 0x06], ['F7', 0x07], ['F8', 0x0E], ['F9', 0x0F], ['F10', 0x10],
 ]);
 
 /**
- * Shifted key code overrides.
- * When Shift is held, certain keys produce different FM-7 codes.
- * Letters become lowercase on FM-7 (the FM-7 keyboard sends uppercase
- * by default; Shift gives lowercase - opposite of PC convention).
+ * FM77AV mode: Hardware scan codes (key matrix positions).
+ * FM77AV can operate in scan code mode where $FD01 returns raw
+ * keyboard matrix positions instead of ASCII.
+ */
+const CODE_TO_FM7_SCAN = new Map([
+    // Row 0: ESC, digits, symbols
+    ['Escape',     0x01],
+    ['Digit1',     0x02], ['Digit2', 0x03], ['Digit3', 0x04], ['Digit4', 0x05],
+    ['Digit5',     0x06], ['Digit6', 0x07], ['Digit7', 0x08], ['Digit8', 0x09],
+    ['Digit9',     0x0A], ['Digit0', 0x0B],
+    ['Minus',      0x0C],  // -
+    ['Equal',      0x0D],  // ^ (JIS) / = (US)
+    ['Backslash',  0x0E],  // ¥ / backslash
+    ['Backspace',  0x0F],  // BS
+
+    // Row 1: TAB, QWERTYUIOP, @, [
+    ['Tab',        0x10],
+    ['KeyQ', 0x11], ['KeyW', 0x12], ['KeyE', 0x13], ['KeyR', 0x14],
+    ['KeyT', 0x15], ['KeyY', 0x16], ['KeyU', 0x17], ['KeyI', 0x18],
+    ['KeyO', 0x19], ['KeyP', 0x1A],
+    ['BracketLeft',  0x1C],  // [
+
+    // Row 2: RETURN, ASDFGHJKL, ;, :, ]
+    ['Enter',      0x1D],  // RETURN
+    ['KeyA', 0x1E], ['KeyS', 0x1F], ['KeyD', 0x20], ['KeyF', 0x21],
+    ['KeyG', 0x22], ['KeyH', 0x23], ['KeyJ', 0x24], ['KeyK', 0x25],
+    ['KeyL', 0x26],
+    ['Semicolon',    0x27],  // ;
+    ['Quote',        0x28],  // : (JIS) / ' (US)
+    ['BracketRight', 0x29],  // ]
+
+    // Row 3: ZXCVBNM, symbols, SPACE
+    ['KeyZ', 0x2A], ['KeyX', 0x2B], ['KeyC', 0x2C], ['KeyV', 0x2D],
+    ['KeyB', 0x2E], ['KeyN', 0x2F], ['KeyM', 0x30],
+    ['Comma',      0x31],  // ,
+    ['Period',     0x32],  // .
+    ['Slash',      0x33],  // /
+    ['IntlRo',     0x34],  // _ (JIS underscore key)
+    ['Space',      0x35],  // SPACE
+
+    // Numpad
+    ['Numpad7',        0x3A], ['Numpad8',    0x3B], ['Numpad9',        0x3C],
+    ['NumpadDivide',   0x3D],
+    ['Numpad4',        0x3E], ['Numpad5',    0x3F], ['Numpad6',        0x40],
+    ['NumpadMultiply', 0x41],
+    ['Numpad1',        0x42], ['Numpad2',    0x43], ['Numpad3',        0x44],
+    ['NumpadSubtract', 0x45],
+    ['Numpad0',        0x46],
+    ['NumpadDecimal',  0x47],
+    ['Insert',         0x48],  // INS
+    ['NumpadEnter',    0x49],
+    ['Delete',         0x4B],  // DEL
+    ['Home',           0x4B],  // HOME → DEL (FM-7 CLS/HOME)
+
+    // Cursor keys
+    ['ArrowUp',    0x4D],
+    ['ArrowLeft',  0x4F],
+    ['ArrowDown',  0x50],
+    ['ArrowRight', 0x51],
+
+    // Function keys (PF1-PF10)
+    ['F1',  0x57], ['F2',  0x58], ['F3',  0x59], ['F4',  0x5A],
+    ['F5',  0x5B], ['F6',  0x5C], ['F7',  0x5D], ['F8',  0x5E],
+    ['F9',  0x5F], ['F10', 0x60],
+]);
+
+/**
+ * Shifted key code overrides (FM-7 ASCII mode only).
+ * In scan code mode (FM77AV), Shift is a separate key and doesn't
+ * change the scan code, so these are not used.
  */
 const SHIFTED_OVERRIDE = new Map([
     // Letters: Shift produces lowercase on FM-7
@@ -148,30 +179,14 @@ const SHIFTED_OVERRIDE = new Map([
     ['KeyQ', 0x71], ['KeyR', 0x72], ['KeyS', 0x73], ['KeyT', 0x74],
     ['KeyU', 0x75], ['KeyV', 0x76], ['KeyW', 0x77], ['KeyX', 0x78],
     ['KeyY', 0x79], ['KeyZ', 0x7A],
-
-    // Shifted digit row (US layout -> FM-7 approximation)
-    ['Digit1', 0x21],  // !
-    ['Digit2', 0x22],  // "
-    ['Digit3', 0x23],  // #
-    ['Digit4', 0x24],  // $
-    ['Digit5', 0x25],  // %
-    ['Digit6', 0x26],  // &
-    ['Digit7', 0x27],  // '
-    ['Digit8', 0x28],  // (
-    ['Digit9', 0x29],  // )
-    ['Digit0', 0x30],  // 0 (no shifted variant on FM-7 for 0)
-
+    // Shifted digit row
+    ['Digit1', 0x21], ['Digit2', 0x22], ['Digit3', 0x23], ['Digit4', 0x24],
+    ['Digit5', 0x25], ['Digit6', 0x26], ['Digit7', 0x27], ['Digit8', 0x28],
+    ['Digit9', 0x29],
     // Shifted symbols
-    ['Minus',        0x3D],  // = (Shift+- on FM-7 JIS)
-    ['Equal',        0x2B],  // +
-    ['Semicolon',    0x2B],  // + (Shift+; on FM-7)
-    ['Quote',        0x2A],  // *
-    ['Comma',        0x3C],  // <
-    ['Period',       0x3E],  // >
-    ['Slash',        0x3F],  // ?
-    ['BracketLeft',  0x7B],  // {
-    ['BracketRight', 0x7D],  // }
-    ['Backslash',    0x7C],  // |
+    ['Minus', 0x3D], ['Equal', 0x2B], ['Semicolon', 0x2B], ['Quote', 0x2A],
+    ['Comma', 0x3C], ['Period', 0x3E], ['Slash', 0x3F],
+    ['BracketLeft', 0x7B], ['BracketRight', 0x7D], ['Backslash', 0x7C],
 ]);
 
 /**
@@ -182,6 +197,13 @@ const KEY_BUFFER_SIZE = 16;
 
 export class Keyboard {
     constructor() {
+        /**
+         * Use hardware scan codes instead of ASCII.
+         * FM-7: false (ASCII mode), FM77AV: true (scan code mode).
+         * Set by fm7.js based on machine type.
+         */
+        this._useScanCodes = false;
+
         // --- Key event FIFO buffer ---
         /** @type {number[]} circular buffer of FM-7 key codes (7-bit + break bit) */
         this._buffer = [];
@@ -221,6 +243,13 @@ export class Keyboard {
         // Track currently held keys to avoid auto-repeat flooding
         /** @type {Set<string>} set of KeyboardEvent.code values currently held */
         this._heldKeys = new Set();
+
+        /**
+         * FM77AV break code support.
+         * When true, key-up events generate break codes (make code | 0x80).
+         * FM-7 does not generate break codes; FM77AV does.
+         */
+        this._enableBreakCodes = false;
     }
 
     // ------------------------------------------------------------------
@@ -241,7 +270,8 @@ export class Keyboard {
 
         // Ignore auto-repeat
         if (this._heldKeys.has(code)) {
-            if (CODE_TO_FM7.has(code)) event.preventDefault();
+            const t = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
+            if (t.has(code)) event.preventDefault();
             return;
         }
 
@@ -251,21 +281,16 @@ export class Keyboard {
         event.preventDefault();
         this._heldKeys.add(code);
 
-        // Ctrl modifier: for letters, produce control code (0x01-0x1A)
-        let finalCode = fm7Code;
-        if (event.ctrlKey && fm7Code >= 0x41 && fm7Code <= 0x5A) {
-            finalCode = fm7Code - 0x40;  // Ctrl+A=0x01, Ctrl+Z=0x1A
-        }
-
-        this._pushKey(finalCode & 0x7F);  // make (key down)
+        // In scan code mode, modifiers (Ctrl/Shift) are separate keys
+        // No ASCII conversion needed - send raw scan code
+        this._pushKey(fm7Code & 0x7F);  // make (key down)
     }
 
     /**
      * Handle a browser keyup event.
      *
-     * FM-7 keyboard encoder does NOT generate break codes.
-     * (Break codes are an FM77AV feature, not supported here.)
-     * We only track held keys to filter browser auto-repeat.
+     * FM-7: no break codes — only releases the held key tracking.
+     * FM77AV: generates break codes (make code | 0x80) on key release.
      *
      * @param {KeyboardEvent} event
      */
@@ -275,9 +300,17 @@ export class Keyboard {
         if (!this._heldKeys.has(code)) return;
         this._heldKeys.delete(code);
 
-        // FM-7: no break codes sent — just release the held key tracking
-        if (CODE_TO_FM7.has(code)) {
+        const tbl = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
+        if (tbl.has(code)) {
             event.preventDefault();
+        }
+
+        // FM77AV: send break code (key release)
+        if (this._enableBreakCodes) {
+            const fm7Code = this._mapKey(code, event.shiftKey);
+            if (fm7Code !== FM7_KEY_NONE) {
+                this._pushKey((fm7Code & 0x7F) | FM7_KEY_BREAK);
+            }
         }
     }
 
@@ -294,8 +327,9 @@ export class Keyboard {
     readIO(addr) {
         switch (addr) {
             case 0xFD00:
-                // FM-7: D7 = data ready (1=ready), D6-D0 = key code (without break flag)
-                // FM-7: $FD00 returns key data byte with bit 7 as ready flag
+                // Keyboard status register:
+                // bit 7: 1 = key data available, 0 = no data
+                // bits 6-0: current key code (without break flag)
                 this._prepareNext();
                 if (this._keyAvailable) {
                     return 0x80 | (this._currentKey & 0x7F);
@@ -361,8 +395,12 @@ export class Keyboard {
     /**
      * Return true if the keyboard IRQ line is asserted.
      */
+    /**
+     * Check if keyboard IRQ is active (for $FD03 status and CPU IRQ line).
+     * Requires BOTH: flag set AND mask clear.
+     */
     isIRQActive() {
-        return this._irqFlag;
+        return this._irqFlag && (this._irqMask === 0);
     }
 
     /**
@@ -409,11 +447,12 @@ export class Keyboard {
      * @returns {number} FM-7 key code, or FM7_KEY_NONE if unmapped
      */
     _mapKey(code, shifted) {
-        if (shifted && SHIFTED_OVERRIDE.has(code)) {
+        const table = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
+        if (!this._useScanCodes && shifted && SHIFTED_OVERRIDE.has(code)) {
             return SHIFTED_OVERRIDE.get(code);
         }
-        if (CODE_TO_FM7.has(code)) {
-            return CODE_TO_FM7.get(code);
+        if (table.has(code)) {
+            return table.get(code);
         }
         return FM7_KEY_NONE;
     }
@@ -453,9 +492,11 @@ export class Keyboard {
      * Assert keyboard IRQ if the mask allows it.
      */
     _assertIRQ() {
-        if (this._irqMask !== 0) return;
-
+        // Flag is ALWAYS set when a key event arrives (regardless of mask)
         this._irqFlag = true;
+
+        // But only trigger CPU IRQ line if mask allows it
+        if (this._irqMask !== 0) return;
         if (typeof this.onIRQ === 'function') {
             this.onIRQ();
         }
@@ -469,5 +510,5 @@ export {
     FM7_KEY_LEFT, FM7_KEY_RIGHT, FM7_KEY_UP, FM7_KEY_DOWN, FM7_KEY_HOME,
     FM7_KEY_F1, FM7_KEY_F2, FM7_KEY_F3, FM7_KEY_F4, FM7_KEY_F5,
     FM7_KEY_F6, FM7_KEY_F7, FM7_KEY_F8, FM7_KEY_F9, FM7_KEY_F10,
-    CODE_TO_FM7, SHIFTED_OVERRIDE,
+    CODE_TO_FM7_ASCII, CODE_TO_FM7_SCAN, SHIFTED_OVERRIDE,
 };

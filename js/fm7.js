@@ -11,6 +11,7 @@ import { FDC } from './fdc.js';
 import { Scheduler } from './scheduler.js';
 import { Keyboard } from './keyboard.js';
 import { PSG } from './psg.js';
+import { OPN } from './opn.js';
 import { usToCycles, cyclesToUs } from './scheduler.js';
 
 // =============================================================================
@@ -34,6 +35,15 @@ const SUB_ROM_BASE       = 0xD800;   // Sub CPU ROM ($D800-$FFFF)
 const SUB_ROM_SIZE       = 0x2800;   // 10KB
 const CG_ROM_BASE        = 0xD000;   // CG ROM region (within sub address space)
 
+// FM77AV Sub ROM layout
+const SUB_ROM_AV_BASE    = 0xE000;   // Type-A/B ROM start ($E000-$FFFF, 8KB)
+const SUB_ROM_AV_SIZE    = 0x2000;   // 8KB
+
+// FM77AV Sub monitor types
+const SUB_MONITOR_A      = 0;        // FM77AV native mode
+const SUB_MONITOR_B      = 1;        // FM77AV extended
+const SUB_MONITOR_C      = 2;        // FM-7 compatible
+
 // I/O port addresses (main CPU side)
 const FD00_KEY_STATUS    = 0xFD00;   // Keyboard status
 const FD01_KEY_DATA      = 0xFD01;   // Keyboard data
@@ -42,6 +52,21 @@ const FD03_IRQ_STATUS    = 0xFD03;   // IRQ status / mask
 const FD04_IRQ_MASK      = 0xFD04;   // IRQ mask register
 const FD05_SUB_CTRL      = 0xFD05;   // Sub CPU control (write: HALT/CANCEL, read: BUSY)
 const FD0F_ROM_SELECT    = 0xFD0F;   // ROM bank select
+
+// FM77AV additional I/O ports (main CPU side)
+const FD12_SUB_MONITOR   = 0xFD12;   // Sub monitor type / initiator control
+const FD13_CG_BANK       = 0xFD13;   // CG ROM bank select
+const FD30_APAL_ADDR_HI  = 0xFD30;   // Analog palette address high nibble
+const FD31_APAL_ADDR_LO  = 0xFD31;   // Analog palette address low byte
+const FD32_APAL_BLUE     = 0xFD32;   // Analog palette Blue data
+const FD33_APAL_RED      = 0xFD33;   // Analog palette Red data
+
+// FM77AV MMR (Memory Management Register)
+const FD92_MMR_SEG       = 0xFD92;   // MMR segment register
+const FD93_MMR_CTRL      = 0xFD93;   // MMR control register
+const MMR_WINDOW_SIZE    = 0x1000;   // 4KB per MMR window
+const MMR_NUM_SEGMENTS   = 16;       // 16 × 4KB = 64KB logical space
+const MMR_EXTENDED_RAM   = 0x30000;  // 192KB extended RAM
 
 // FDC I/O ($FD18-$FD1F)
 const FDC_IO_BASE        = 0xFD18;
@@ -55,8 +80,14 @@ const TIMER_PERIOD_US    = 2034;
 // FM7 Main System Class
 // =============================================================================
 
+// Machine types
+export const MACHINE_FM7    = 'fm7';
+export const MACHINE_FM77AV = 'fm77av';
+
 export class FM7 {
     constructor() {
+        // --- Machine type ---
+        this._machineType = MACHINE_FM7;
         // --- Component instances ---
         this.mainCPU   = new CPU6809();
         this.subCPU    = new CPU6809();
@@ -65,14 +96,20 @@ export class FM7 {
         this.scheduler = new Scheduler();
         this.keyboard  = new Keyboard();
         this.psg       = new PSG();
+        this.opn       = new OPN();
 
         // --- Memory arrays ---
         this.mainRAM    = new Uint8Array(0x10000);              // Full 64KB RAM (ROM overlays on top)
         this.fbasicROM  = new Uint8Array(FBASIC_ROM_SIZE);     // $8000-$FBFF
         this.bootROM    = new Uint8Array(BOOT_ROM_SIZE);        // $FE00-$FFFF
         this.subROM     = new Uint8Array(SUB_ROM_SIZE);         // Sub CPU $D800-$FFFF
-        this.cgROM      = new Uint8Array(0x1000);               // CG ROM (4KB)
+        this.cgROM      = new Uint8Array(0x2000);               // CG ROM (8KB, 4 banks x 2KB)
         this.sharedRAM  = new Uint8Array(SHARED_RAM_SIZE);      // $FC80-$FCFF
+
+        // --- FM77AV additional ROM arrays ---
+        this.initiateROM = new Uint8Array(0x2000);    // Initiator ROM (up to 8KB)
+        this.subROM_A    = new Uint8Array(0x2800);    // Sub-system Type-A ROM (up to 10KB: $D800-$FFFF)
+        this.subROM_B    = new Uint8Array(0x2800);    // Sub-system Type-B ROM (up to 10KB: $D800-$FFFF)
 
         // --- ROM loaded flags ---
         this.romLoaded = {
@@ -80,6 +117,10 @@ export class FM7 {
             boot: false,
             sub: false,
             cg: false,
+            // FM77AV ROMs
+            initiate: false,
+            subA: false,
+            subB: false,
         };
 
         // --- I/O state ---
@@ -90,6 +131,32 @@ export class FM7 {
         this._breakKey    = false;  // BREAK key state (directly read via $FD04 bit1)
         this._bootMode    = 'dos';  // 'dos' or 'basic'
         this._basicRomEnabled = true; // BASIC ROM overlay at $8000-$FBFF
+
+        // --- FM77AV specific state ---
+        this._initiateROMSize = 0;       // Actual size of loaded Initiator ROM
+        this._subROM_ASize    = 0;       // Actual size of loaded Type-A ROM
+        this._subROM_BSize    = 0;       // Actual size of loaded Type-B ROM
+        this._initiatorActive = false;   // Initiator ROM mapped at $FE00-$FFFF
+        this._fd10Reg         = 0;       // FM77AV extended sub CPU mode register ($FD10)
+        this._subMonitorType  = SUB_MONITOR_C; // Sub monitor: A=0, B=1, C=2
+        this._cgRomBank       = 0;       // CG ROM bank (0-3, bits 0-1 of $D430)
+        this._nmiMaskSub      = false;   // NMI mask for sub CPU (bit 7 of $D430)
+        this._subResetFlag    = false;   // Sub CPU reset flag (read via $D430 bit 0)
+        this._vsyncFlag       = true;    // TRUE=active display, FALSE=vertical blanking
+        this._blankFlag       = false;   // TRUE=horizontal blanking active
+        this._vblankCycles    = 0;       // Cycle counter for VBlank period
+        this._subNmiDelay     = 0;       // Cycles to delay NMI after sub CPU reset (INTR_SLOAD emulation)
+        // Analog palette (4096 entries, 12-bit RGB: B4:R4:G4)
+        this._analogPalette     = new Uint16Array(4096);
+        this._analogPaletteAddr = 0;     // Palette write address
+
+        // MMR (Memory Management Register) - FM77AV
+        // Maps 16 × 4KB windows in logical $0000-$FFFF to physical extended RAM
+        this._mmrEnabled   = false;        // MMR active flag
+        this._mmrBank      = 0;            // MMR bank set (0 or 1)
+        this._mmrSegSelect = 0;            // Segment select for $FD92 writes
+        this._mmrRegs      = new Uint8Array(32); // 2 banks × 16 segments
+        this._extRAM       = new Uint8Array(MMR_EXTENDED_RAM); // 192KB extended RAM
 
         // --- OPN (YM2203) stub with BDIR/BC1 protocol ---
         this._opnAddrLatch = 0;
@@ -142,8 +209,29 @@ export class FM7 {
     _mainRead(addr) {
         addr &= 0xFFFF;
 
+        // FM77AV MMR: remap $0000-$FCFF through segment table
+        if (this._mmrEnabled && addr < 0xFD00) {
+            const seg = addr >> 12;  // 4KB segment number (0-15)
+            const bankOff = this._mmrBank * MMR_NUM_SEGMENTS;
+            const physPage = this._mmrRegs[bankOff + seg];
+            if (physPage >= 0x10) {
+                // Extended RAM access: physPage maps to physical 4KB blocks
+                const physAddr = ((physPage - 0x10) << 12) | (addr & 0x0FFF);
+                if (physAddr < MMR_EXTENDED_RAM) {
+                    return this._extRAM[physAddr];
+                }
+                return 0xFF;
+            }
+            // physPage < 0x10: pass through to normal memory map below
+        }
+
         // $0000-$7FFF: Main RAM (32KB)
         if (addr < MAIN_RAM_SIZE) {
+            // FM77AV: Initiator ROM code body maps at $6000-$7FFF when active
+            if (this.isFM77AV && this._initiatorActive && this.romLoaded.initiate
+                && addr >= 0x6000) {
+                return this.initiateROM[addr - 0x6000];
+            }
             return this.mainRAM[addr];
         }
 
@@ -152,7 +240,7 @@ export class FM7 {
             if (this._basicRomEnabled && this.romLoaded.fbasic) {
                 return this.fbasicROM[addr - 0x8000];
             }
-            return this.mainRAM[addr]; // RAM under ROM overlay
+            return this.mainRAM[addr];
         }
 
         // $FC00-$FC7F: RAM
@@ -165,7 +253,7 @@ export class FM7 {
             if (this._subHalted) {
                 return this.sharedRAM[addr - SHARED_RAM_BASE];
             }
-            return 0xFF; // Not accessible while sub CPU is running
+            return 0xFF;
         }
 
         // $FD00-$FDFF: I/O space
@@ -173,8 +261,16 @@ export class FM7 {
             return this._mainIORead(addr);
         }
 
-        // $FE00-$FFFF: Boot ROM
+        // $FE00-$FFFF: Boot ROM / Initiator ROM
         if (addr >= BOOT_ROM_BASE) {
+            if (this.isFM77AV && this._initiatorActive && this.romLoaded.initiate) {
+                // Initiator ROM vector area: last 512 bytes map to $FE00-$FFFF
+                const romSize = this._initiateROMSize || BOOT_ROM_SIZE;
+                const romOffset = (romSize > BOOT_ROM_SIZE)
+                    ? (addr - BOOT_ROM_BASE) + (romSize - BOOT_ROM_SIZE)
+                    : (addr - BOOT_ROM_BASE);
+                return this.initiateROM[romOffset];
+            }
             return this.bootROM[addr - BOOT_ROM_BASE];
         }
 
@@ -188,6 +284,20 @@ export class FM7 {
     _mainWrite(addr, val) {
         addr &= 0xFFFF;
         val &= 0xFF;
+
+        // FM77AV MMR: remap writes through segment table
+        if (this._mmrEnabled && addr < 0xFD00) {
+            const seg = addr >> 12;
+            const bankOff = this._mmrBank * MMR_NUM_SEGMENTS;
+            const physPage = this._mmrRegs[bankOff + seg];
+            if (physPage >= 0x10) {
+                const physAddr = ((physPage - 0x10) << 12) | (addr & 0x0FFF);
+                if (physAddr < MMR_EXTENDED_RAM) {
+                    this._extRAM[physAddr] = val;
+                }
+                return;
+            }
+        }
 
         // $0000-$FBFF: RAM (writes always go to RAM, even under ROM overlay)
         if (addr < 0xFC00) {
@@ -234,22 +344,24 @@ export class FM7 {
         }
 
         // IRQ status ($FD03 read)
-        // FM-7 I/O $FD03 read: IRQ status
-        // bit 0: keyboard data available (active low) - NOT gated by IRQ mask
+        // bit 0: keyboard data available (active low: 0=data ready)
+        //        NOT gated by IRQ mask - shows raw data availability
         // bit 2: timer IRQ (active low) - clears on read
         // bit 3: printer IRQ (active low) - clears on read
         if (addr === FD03_IRQ_STATUS) {
             let status = 0xFF;
-            if (this.keyboard.hasKey()) status &= ~0x01;
+            // bit 0: keyboard data pending (active low)
+            // Use _keyAvailable directly - indicates staged key data
+            // regardless of IRQ flag/mask state (polling mode support)
+            if (this.keyboard._keyAvailable) status &= ~0x01;
             if (this._timerIRQ) {
                 status &= ~0x04;
-                this._timerIRQ = false;  // Timer IRQ clears on read
+                this._timerIRQ = false;
             }
             return status;
         }
 
         // $FD04: Sub CPU status (BUSY, attention, break key)
-        // FM-7 I/O $FD04 read: sub CPU status
         if (addr === FD04_IRQ_MASK) {
             let ret = this._subBusy ? 0xFF : 0x7F;  // bit 7 = BUSY
             if (this._subAttn) {
@@ -258,6 +370,10 @@ export class FM7 {
             }
             // bit 1 = break key (active low: 0=pressed, 1=not pressed)
             if (this._breakKey) ret &= ~0x02;
+            // FM77AV: clear subreset_flag when initiator ROM is no longer active
+            if (this.isFM77AV && this._subResetFlag && !this._initiatorActive) {
+                this._subResetFlag = false;
+            }
             return ret;
         }
 
@@ -272,15 +388,53 @@ export class FM7 {
             return ret;
         }
 
+        // $FD0B: FM77AV boot/mode register read
+        // Returns machine configuration: bit 0-1 = boot device, bit 6 = FM77AV ID
+        if (addr === 0xFD0B) {
+            if (this.isFM77AV) {
+                // bit 0: 0=DOS boot, 1=BASIC boot
+                // bit 6: 0 = FM77AV present
+                let val = 0x00;
+                if (this._bootMode === 'basic') val |= 0x01;
+                return val;
+            }
+            return 0xFF;
+        }
+
         // $FD0F: Reading enables BASIC ROM overlay
         if (addr === FD0F_ROM_SELECT) {
             this._basicRomEnabled = true;
             return 0xFE;
         }
 
+        // FM77AV: $FD10 read - Extended sub CPU status
+        if (addr === 0xFD10 && this.isFM77AV) {
+            // Returns mode/status byte
+            return this._fd10Reg || 0x00;
+        }
+
+        // FM77AV: $FD12 read - Sub mode status
+        // bit 6: mode320 (1=320x200, 0=640x200)
+        // bit 1: blank_flag (0=blanking active)
+        // bit 0: vsync_flag (0=NOT in vsync)
+        if (addr === FD12_SUB_MONITOR && this.isFM77AV) {
+            let ret = 0xFF;
+            if (this.display.displayMode === 1) ret |= 0x40; else ret &= ~0x40;
+            // bit 1: blank_flag (0 when blanking active)
+            if (this._blankFlag) ret &= ~0x02;
+            // bit 0: vsync_flag (0 when NOT in vsync)
+            if (!this._vsyncFlag) ret &= ~0x01;
+            return ret;
+        }
+
         // FDC registers ($FD18-$FD1F)
         if (addr >= FDC_IO_BASE && addr <= FDC_IO_END) {
             return this.fdc.readIO(addr);
+        }
+
+        // $FD37: Multi-page register (main CPU side access)
+        if (addr === 0xFD37) {
+            return this.display.multiPage;
         }
 
         // $FD38-$FD3F: TTL palette (main CPU side access)
@@ -298,15 +452,34 @@ export class FM7 {
             return this.psg.readData();
         }
 
-        // $FD15: OPN status register read (bit 7=BUSY, bit 1=Timer B, bit 0=Timer A)
+        // $FD15: OPN status register / BDIR-BC1 read
         if (addr === 0xFD15) {
-            return 0x00;  // OPN present, not busy
+            return this.opn.readStatus();
         }
 
         // $FD16: OPN data bus read
-        // Returns value set by last BDIR/BC1 Read command ($FD15 ← $01)
         if (addr === 0xFD16) {
             return this._opnDataBus;
+        }
+
+        // FM77AV: MMR registers
+        if (this.isFM77AV) {
+            if (addr === FD92_MMR_SEG) {
+                return this._mmrRegs[this._mmrBank * MMR_NUM_SEGMENTS + this._mmrSegSelect];
+            }
+            if (addr === FD93_MMR_CTRL) {
+                return (this._mmrEnabled ? 0x80 : 0x00) | (this._mmrBank & 0x01);
+            }
+        }
+
+        // Log unhandled I/O reads (FM77AV mode only, throttled)
+        if (this.isFM77AV) {
+            const key = addr & 0xFFFF;
+            if (!this._ioWarnSeen) this._ioWarnSeen = new Set();
+            if (!this._ioWarnSeen.has(key)) {
+                this._ioWarnSeen.add(key);
+                console.warn(`[IO READ] Unhandled $${addr.toString(16).toUpperCase()} at MainPC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
+            }
         }
 
         // Other I/O - return default
@@ -359,8 +532,8 @@ export class FM7 {
 
             if (cancelReq) {
                 this._subCancel = true;
-                // CANCEL sends FIRQ to sub CPU
-                this.subCPU.firq();
+                // CANCEL asserts IRQ on sub CPU (not FIRQ)
+                this.subCPU.irq();
             }
             return;
         }
@@ -368,6 +541,114 @@ export class FM7 {
         // $FD0F: Writing disables BASIC ROM overlay
         if (addr === FD0F_ROM_SELECT) {
             this._basicRomEnabled = false;
+            return;
+        }
+
+        // FM77AV: $FD10 write - Mode control / Initiator ROM disable
+        // Writing to $FD10 disables the Initiator ROM overlay,
+        // returning $FE00-$FFFF to normal boot ROM and $6000-$7FFF to RAM.
+        if (addr === 0xFD10 && this.isFM77AV) {
+            this._fd10Reg = val;
+            if (this._initiatorActive) {
+                this._initiatorActive = false;
+                console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
+            }
+            return;
+        }
+
+        // FM77AV: $FD12 write - 320/640 mode select
+        // bit 6: 1=320x200 mode, 0=640x200 mode
+        if (addr === FD12_SUB_MONITOR && this.isFM77AV) {
+            const mode320 = (val & 0x40) !== 0;
+            this.display._setDisplayMode(mode320 ? 1 : 0);
+            return;
+        }
+
+        // FM77AV: $FD13 write - Sub ROM bank switch + Sub CPU reset
+        // bit 1-0: subrom_bank (0=Type-C, 1=Type-A, 2=Type-B)
+        // Writing triggers sub CPU reset
+        if (addr === FD13_CG_BANK && this.isFM77AV) {
+            const bank = val & 0x03;
+            const oldType = this._subMonitorType;
+            this._subMonitorType = bank;
+            // Reset sub CPU
+            this._subBusy = true;
+            this._subHalted = false;
+            this._subResetFlag = true;
+
+            // Reset display subsystem (matches display_reset in reference)
+            this.display.resetALU();
+            this.display.resetPalette();
+            this.display.multiPage = 0;
+            this.display.vramOffset[0] = 0;
+            this.display.vramOffset[1] = 0;
+            this.display._vramOffsetCount[0] = 0;
+            this.display._vramOffsetCount[1] = 0;
+            this.display.vramOffsetFlag = false;
+            this.display.crtOn = false;
+            this.display.vramaFlag = false;
+            this.display.activeVramPage = 0;
+            this.display.displayVramPage = 0;
+            // NOTE: displayMode (320/640) is NOT reset by sub ROM bank switch
+            // NOTE: cgRomBank is NOT reset by sub ROM bank switch
+
+            // Reset NMI mask (NMI enabled after sub reset)
+            this._nmiMaskSub = false;
+            this._blankFlag = true;  // Blanking active after reset
+
+            this.subCPU.reset();
+            this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
+            this.scheduler.setSubHalted(false);
+            if (oldType !== bank) {
+                console.log('FM77AV: Sub ROM bank → Type-' +
+                    ['C', 'A', 'B', 'CG'][bank] + ', sub CPU reset');
+            }
+            return;
+        }
+
+        // FM77AV: $FD30-$FD34 - Analog palette
+        // $FD30: palette address high (bits 11-8 from low nibble of data)
+        // $FD31: palette address low (full byte = bits 7-0)
+        // $FD32: Blue level (low nibble = 4-bit blue intensity)
+        // $FD33: Red level (low nibble = 4-bit red intensity)
+        // $FD34: Green level (low nibble = 4-bit green intensity)
+        if (this.isFM77AV) {
+            if (addr === FD30_APAL_ADDR_HI) {
+                // High nibble of 12-bit palette address
+                this._analogPaletteAddr = (this._analogPaletteAddr & 0x0FF) | ((val & 0x0F) << 8);
+                return;
+            }
+            if (addr === FD31_APAL_ADDR_LO) {
+                // Low byte of 12-bit palette address
+                this._analogPaletteAddr = (this._analogPaletteAddr & 0xF00) | (val & 0xFF);
+                return;
+            }
+            if (addr === FD32_APAL_BLUE) {
+                // Blue data for current palette entry
+                const idx = this._analogPaletteAddr & 0xFFF;
+                const cur = this._analogPalette[idx];
+                this._analogPalette[idx] = (cur & 0x0FF) | ((val & 0x0F) << 8);
+                return;
+            }
+            if (addr === FD33_APAL_RED) {
+                // Red data for current palette entry
+                const idx = this._analogPaletteAddr & 0xFFF;
+                const cur = this._analogPalette[idx];
+                this._analogPalette[idx] = (cur & 0xF0F) | ((val & 0x0F) << 4);
+                return;
+            }
+            // $FD34: Green data for current palette entry
+            if (addr === 0xFD34) {
+                const idx = this._analogPaletteAddr & 0xFFF;
+                const cur = this._analogPalette[idx];
+                this._analogPalette[idx] = (cur & 0xFF0) | (val & 0x0F);
+                return;
+            }
+        }
+
+        // $FD37: Multi-page register (main CPU side access)
+        if (addr === 0xFD37) {
+            this.display.multiPage = val;
             return;
         }
 
@@ -403,7 +684,40 @@ export class FM7 {
                     this._opnAddrLatch = this._opnDataBus & 0xFF;
                     break;
                 case 0x02: // Write: write data bus to latched register
+                    this.opn.writeReg(this._opnAddrLatch, this._opnDataBus);
+                    // Also keep local copy for port A/B joystick reads
                     this._opnRegs[this._opnAddrLatch] = this._opnDataBus;
+                    // SSG registers ($00-$0F): forward to PSG for audio output
+                    // OPN's SSG runs at masterClock/2, while standalone PSG runs
+                    // at masterClock. Compensate by doubling tone/noise/envelope periods.
+                    if (this._opnAddrLatch <= 0x0F) {
+                        const reg = this._opnAddrLatch;
+                        const dat = this._opnDataBus;
+                        // Store raw value in PSG regs first
+                        this.psg.regs[reg] = dat;
+                        // Recalculate periods with 2x multiplier for OPN SSG clock
+                        switch (reg) {
+                            case 0: case 1:
+                                this.psg._tonePeriod[0] = (((this.psg.regs[1] & 0x0F) << 8) | this.psg.regs[0]) * 2;
+                                break;
+                            case 2: case 3:
+                                this.psg._tonePeriod[1] = (((this.psg.regs[3] & 0x0F) << 8) | this.psg.regs[2]) * 2;
+                                break;
+                            case 4: case 5:
+                                this.psg._tonePeriod[2] = (((this.psg.regs[5] & 0x0F) << 8) | this.psg.regs[4]) * 2;
+                                break;
+                            case 6:
+                                this.psg._noisePeriod = (dat & 0x1F) * 2;
+                                break;
+                            case 11: case 12:
+                                this.psg._envPeriod = (this.psg.regs[11] | (this.psg.regs[12] << 8)) * 2;
+                                break;
+                            default:
+                                // Mixer, volume, envelope shape: no period adjustment needed
+                                this.psg._writeReg(reg, dat);
+                                break;
+                        }
+                    }
                     break;
                 case 0x01: { // Read: load latched register onto data bus
                     const reg = this._opnAddrLatch;
@@ -428,7 +742,38 @@ export class FM7 {
             return;
         }
 
-        // Other I/O writes (printer, etc.) - ignored
+        // FM77AV: MMR registers
+        if (this.isFM77AV) {
+            if (addr === FD92_MMR_SEG) {
+                // Write to MMR segment register
+                // Selects which physical page maps to each 4KB logical segment
+                // Format: writes go to the current bank's segment table
+                // The address latch ($FD93 low nibble selects segment) approach:
+                // Actually, FM77AV MMR uses $FD92 as a window into the segment table
+                // indexed by the low nibble of previous $FD93 write
+                this._mmrRegs[this._mmrBank * MMR_NUM_SEGMENTS + this._mmrSegSelect] = val;
+                return;
+            }
+            if (addr === FD93_MMR_CTRL) {
+                // bit 7: MMR enable
+                // bit 6: MMR bank select (0 or 1)
+                // bit 3-0: segment select for $FD92 writes
+                this._mmrEnabled = (val & 0x80) !== 0;
+                this._mmrBank = (val >> 6) & 0x01;
+                this._mmrSegSelect = val & 0x0F;
+                return;
+            }
+        }
+
+        // Log unhandled I/O writes (FM77AV mode only, throttled)
+        if (this.isFM77AV) {
+            const key = 0x10000 | (addr & 0xFFFF);
+            if (!this._ioWarnSeen) this._ioWarnSeen = new Set();
+            if (!this._ioWarnSeen.has(key)) {
+                this._ioWarnSeen.add(key);
+                console.warn(`[IO WRITE] Unhandled $${addr.toString(16).toUpperCase()} = $${val.toString(16).toUpperCase()} at MainPC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
+            }
+        }
     }
 
     // =========================================================================
@@ -454,14 +799,15 @@ export class FM7 {
             const ioAddr = 0xD400 + ((addr - 0xD400) & 0x0F);
 
             // Keyboard ($D400-$D401) - sub CPU side access
-            // Keyboard: $D400=status, $D401=data+clear IRQ
+            // $D400: bit 7 = 1 when key data available, bits 6-0 = key code
             if (ioAddr === 0xD400) {
-                return this.keyboard.hasKey() ? 0x7F : 0xFF;
+                if (this.keyboard.hasKey()) {
+                    return 0x80 | (this.keyboard.getKeyData() & 0x7F);
+                }
+                return this.keyboard.getKeyData() & 0x7F;
             }
             if (ioAddr === 0xD401) {
                 const data = this.keyboard.readIO(0xFD01);
-                // Reading $D401 also sends FIRQ to sub CPU
-                this.subCPU.firq();
                 return data;
             }
 
@@ -472,6 +818,9 @@ export class FM7 {
             if (result.sideEffect === 'cancelAck') {
                 // $D402: Cancel IRQ ACK
                 this._subCancel = false;
+                // De-assert IRQ on sub CPU
+                // Since cancel is the only IRQ source for sub CPU, clear it
+                this.subCPU.intr &= ~0x04;  // INTR_IRQ = 0x04
             } else if (result.sideEffect === 'attention') {
                 // $D404: Set attention flag, trigger main CPU FIRQ
                 this._subAttn = true;
@@ -484,13 +833,116 @@ export class FM7 {
             return result.value;
         }
 
-        // $D410-$D7FF: Sub CPU I/O mirrors (FM-7: mirrors $D400-$D40F)
+        // FM77AV: $D410-$D4FF I/O area
+        if (this.isFM77AV && addr >= 0xD410 && addr < 0xD500) {
+            // $D440-$D4FF: Mirror to $D400-$D43F (6-bit mask)
+            if (addr >= 0xD440) {
+                return this._subRead(0xD400 + ((addr - 0xD400) & 0x3F));
+            }
+            // $D410-$D42B: ALU + line drawing registers
+            if (addr <= 0xD42B) {
+                const result = this.display.readIO(addr);
+                return result.value;
+            }
+            // $D42C-$D42F: Additional FM77AV registers
+            if (addr <= 0xD42F) {
+                return 0xFF;
+            }
+            // $D430: MISC register read — STATUS (different from write!)
+            // bit 7: blank_flag (0 when blanking active)
+            // bit 4: line_busy (0 when line drawing active)
+            // bit 2: vsync_flag (0 when NOT in vsync)
+            // bit 0: subreset_flag (0 when sub CPU NOT reset)
+            if (addr === 0xD430) {
+                let ret = 0xFF;
+                // bit 7: blank_flag (0 when blanking active)
+                if (this._blankFlag) {
+                    ret &= ~0x80;
+                }
+                // bit 4: line_busy (0 = busy)
+                if (this.display.lineBusy) {
+                    ret &= ~0x10;
+                }
+                // bit 2: vsync_flag (0 when NOT in vsync, i.e., during VBlank)
+                if (!this._vsyncFlag) {
+                    ret &= ~0x04;
+                }
+                // bit 0: subreset_flag (0 when sub CPU NOT in reset state)
+                if (!this._subResetFlag) {
+                    ret &= ~0x01;
+                }
+                return ret;
+            }
+            // $D431: Key encoder data receive
+            if (addr === 0xD431) {
+                return 0xFF;  // No data in receive buffer
+            }
+            // $D432: Key encoder status
+            // bit 7: RXRDY (0 = data ready in receive buffer)
+            // bit 0: ACK (0 = ACK signal active)
+            // After reset: no data ready (bit 7=1), ACK idle (bit 0=1) => 0xFF
+            if (addr === 0xD432) {
+                // No pending receive data (RXRDY=1), ACK not active (bit0=1)
+                return 0xFF;
+            }
+            // $D433-$D43F: Other FM77AV registers
+            return 0xFF;
+        }
+
+        // FM77AV: Extended work RAM at $D500-$D7FF
+        if (this.isFM77AV && addr >= 0xD500 && addr < SUB_ROM_BASE) {
+            return this.display.workRam[0x1380 + (addr - 0xD500)];
+        }
+
+        // $D410-$D7FF: mirror / open bus
         if (addr < SUB_ROM_BASE) {
-            // Mirror: redirect to $D400-$D40F
+            if (this.isFM77AV) {
+                // FM77AV: $D410-$D4FF already handled above
+                return 0xFF;
+            }
+            // FM-7: $D410-$D7FF mirrors $D400-$D40F
             return this._subRead(0xD400 + ((addr - 0xD400) & 0x0F));
         }
 
-        // $D800-$FFFF: Sub CPU ROM
+        // $D800-$DFFF: CG ROM (FM77AV) or Sub ROM (FM-7)
+        if (addr < SUB_ROM_AV_BASE) {
+            if (this.isFM77AV) {
+                // Type-C: use sub ROM (FM-7 compatible)
+                if (this._subMonitorType === SUB_MONITOR_C) {
+                    return this.subROM[addr - SUB_ROM_BASE];
+                }
+                // Type-A/B: CG ROM with bank switching
+                const cgAddr = this._cgRomBank * 0x0800 + (addr - 0xD800);
+                if (cgAddr < this.cgROM.length) {
+                    return this.cgROM[cgAddr];
+                }
+                return 0xFF;
+            }
+            // FM-7: Sub ROM
+            return this.subROM[addr - SUB_ROM_BASE];
+        }
+
+        // $E000-$FFFF: Code ROM (bank-switched on FM77AV)
+        if (this.isFM77AV) {
+            // Type-C: FM-7 compatible sub ROM
+            if (this._subMonitorType === SUB_MONITOR_C) {
+                return this.subROM[addr - SUB_ROM_BASE];
+            }
+            // Type-A or Type-B
+            const rom = (this._subMonitorType === SUB_MONITOR_A) ? this.subROM_A : this.subROM_B;
+            const romSize = (this._subMonitorType === SUB_MONITOR_A)
+                ? (this._subROM_ASize || 0x2000)
+                : (this._subROM_BSize || 0x2000);
+
+            if (romSize > 0x2000) {
+                // 10KB ROM: $E000-$FFFF portion
+                return rom[addr - SUB_ROM_BASE];
+            }
+            // 8KB ROM: covers $E000-$FFFF
+            return rom[addr - SUB_ROM_AV_BASE];
+        }
+
+        // FM-7: Type-C ROM fixed
         return this.subROM[addr - SUB_ROM_BASE];
     }
 
@@ -532,13 +984,75 @@ export class FM7 {
             return;
         }
 
-        // $D410-$D7FF: mirrors
+        // FM77AV: $D410-$D4FF I/O area
+        if (this.isFM77AV && addr >= 0xD410 && addr < 0xD500) {
+            // $D440-$D4FF: Mirror to $D400-$D43F (6-bit mask)
+            if (addr >= 0xD440) {
+                this._subWrite(0xD400 + ((addr - 0xD400) & 0x3F), val);
+                return;
+            }
+            // $D410-$D42B: ALU + line drawing registers
+            if (addr <= 0xD42B) {
+                this.display.writeIO(addr, val);
+                return;
+            }
+            // $D42C-$D42F: Additional FM77AV registers
+            if (addr <= 0xD42F) {
+                return;
+            }
+            // $D430: MISC register write
+            // bit 7: NMI mask (1=masked)
+            // bit 6: display page select
+            // bit 5: active page select
+            // bit 2: extended VRAM offset flag
+            // bit 1-0: CG ROM bank
+            if (addr === 0xD430) {
+                // NMI mask (bit 7)
+                this._nmiMaskSub = (val & 0x80) !== 0;
+                if (this._nmiMaskSub) {
+                    // Clear pending NMI on sub CPU
+                    this.subCPU.intr &= ~0x01;  // INTR_NMI = 0x01
+                }
+
+                // Active VRAM page (bit 5)
+                this.display._setActiveVramPage((val >> 5) & 1);
+
+                // Display VRAM page (bit 6)
+                this.display._setDisplayVramPage((val >> 6) & 1);
+
+                // Extended VRAM offset flag (bit 2)
+                this.display.vramOffsetFlag = (val & 0x04) !== 0;
+
+                // CG ROM bank (bits 1-0)
+                this._cgRomBank = val & 0x03;
+
+                this.display.miscReg = val;
+                return;
+            }
+            // $D431: Key encoder data send (acknowledge commands from sub CPU)
+            // $D432: Key encoder status (read-only, writes ignored)
+            // $D433-$D43F: Other FM77AV registers
+            return;
+        }
+
+        // FM77AV: Extended work RAM at $D500-$D7FF
+        if (this.isFM77AV && addr >= 0xD500 && addr < SUB_ROM_BASE) {
+            this.display.workRam[0x1380 + (addr - 0xD500)] = val;
+            return;
+        }
+
+        // $D410+: mirrors / open bus
         if (addr < SUB_ROM_BASE) {
+            if (this.isFM77AV) {
+                // FM77AV: $D410-$D4FF already handled above
+                return;
+            }
+            // FM-7: mirrors $D400-$D40F
             this._subWrite(0xD400 + ((addr - 0xD400) & 0x0F), val);
             return;
         }
 
-        // ROM area ($D800+): writes are ignored
+        // $D800-$FFFF: ROM area, writes are ignored
     }
 
     // =========================================================================
@@ -576,8 +1090,31 @@ export class FM7 {
                 // FDC state machine step
                 this.fdc.step(mainElapsed);
 
+                // VBlank timing: count down VBlank period
+                if (this._vblankCycles > 0) {
+                    this._vblankCycles -= mainElapsed;
+                    if (this._vblankCycles <= 0) {
+                        this._vsyncFlag = true;  // Active display resumes
+                        this._vblankCycles = 0;
+                    }
+                }
+
+                // Sub CPU NMI delay (INTR_SLOAD emulation)
+                if (this._subNmiDelay > 0) {
+                    this._subNmiDelay -= mainElapsed;
+                }
+
+                // HBlank timing: horizontal blanking toggles each line
+                // Line period ~78 cycles (63.5μs * 1.2288MHz)
+                // HBlank portion: last ~15 cycles of each line
+                if (this.isFM77AV) {
+                    this._hblankCounter = ((this._hblankCounter || 0) + mainElapsed) % 78;
+                    this._blankFlag = this._hblankCounter >= 63;
+                }
+
                 // PSG audio synthesis (generates samples into ring buffer)
                 this.psg.step(mainElapsed);
+                this.opn.step(mainElapsed);
 
                 // Check and assert IRQ/FIRQ on main CPU (level-triggered)
                 this._checkAndAssertInterrupts();
@@ -613,22 +1150,36 @@ export class FM7 {
             this._timerIRQ = true;
         });
 
-        // VSync event (60 Hz) → NMI to sub CPU
+        // VSync event (60 Hz) → NMI to sub CPU + vsync timing
         this.scheduler.addVSyncEvent(() => {
             this.display.frameCount++;
-            if (!this._subHalted) {
-                this.subCPU.nmi();
+
+            // Start vertical blanking period
+            // vsync_flag: TRUE=active display, FALSE=VBlank
+            this._vsyncFlag = false;  // Enter VBlank
+            // VBlank lasts ~1200us out of 16667us frame
+            // We'll use a cycle counter to end VBlank
+            this._vblankCycles = usToCycles(1200);
+
+            if (!this._subHalted && !(this.isFM77AV && this._nmiMaskSub)
+                && this._subNmiDelay <= 0) {
+                // Edge-triggered NMI: only deliver if not already pending
+                // Real 6809 NMI uses a latch that is set on rising edge and
+                // cleared when NMI is taken. Don't re-assert during handler.
+                if (!(this.subCPU.intr & 0x01)) {
+                    this.subCPU.nmi();
+                }
             }
         });
     }
 
     /** Check all IRQ/FIRQ sources and assert on CPUs */
     _checkAndAssertInterrupts() {
-        // Main CPU IRQ: timer, keyboard, FDC
+        // Main CPU IRQ: timer, keyboard, FDC, OPN timers
         // FM-7 IRQ is level-triggered: asserted as long as source is active
         let mainIrq = false;
 
-        // Timer IRQ: no mask register, always enabled. Cleared by writing $FD03.
+        // Timer IRQ: no mask register, always enabled. Cleared by reading $FD03.
         if (this._timerIRQ) mainIrq = true;
 
         // Keyboard IRQ: use keyboard module's actual state (handles its own mask)
@@ -636,6 +1187,9 @@ export class FM7 {
 
         // FDC IRQ: check FDC's own flag directly (cleared by reading $FD18)
         if (this.fdc.irqFlag) mainIrq = true;
+
+        // OPN Timer IRQ: Timer A/B flags generate IRQ when enabled
+        if (this.opn.timerAFlag || this.opn.timerBFlag) mainIrq = true;
 
         if (mainIrq) this.mainCPU.irq();
 
@@ -661,11 +1215,16 @@ export class FM7 {
         // through the keyboard encoder buffer; instead it directly drives
         // $FD04 bit 1 (active low).
         this._keyDownHandler = (e) => {
-            // Start / resume PSG audio on first user gesture
+            // Start / resume audio on first user gesture
             if (!this.psg._audioCtx) {
                 this.psg.startAudio();
             } else {
                 this.psg.resumeAudio();
+            }
+            if (!this.opn._audioCtx) {
+                this.opn.startAudio();
+            } else {
+                this.opn.resumeAudio();
             }
 
             if (e.code === 'Backquote') {
@@ -766,7 +1325,7 @@ export class FM7 {
     }
 
     /**
-     * Load CG ROM (character generator)
+     * Load CG ROM (character generator, up to 8KB = 4 banks x 2KB)
      * @param {ArrayBuffer} data
      */
     loadCGROM(data) {
@@ -774,6 +1333,74 @@ export class FM7 {
         const len = Math.min(src.length, this.cgROM.length);
         this.cgROM.set(src.subarray(0, len));
         this.romLoaded.cg = true;
+        console.log(`CG ROM loaded: ${len} bytes (${Math.ceil(len / 0x0800)} banks)`);
+    }
+
+    // =========================================================================
+    // FM77AV ROM Loading
+    // =========================================================================
+
+    /**
+     * Load Initiator ROM (FM77AV, 8KB)
+     * @param {ArrayBuffer} data
+     */
+    loadInitiateROM(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.initiateROM.length);
+        this.initiateROM.set(src.subarray(0, len));
+        this._initiateROMSize = len;
+        this.romLoaded.initiate = true;
+        console.log(`Initiator ROM loaded: ${len} bytes`);
+    }
+
+    /**
+     * Load Sub-system Type-A ROM (FM77AV, 8KB)
+     * @param {ArrayBuffer} data
+     */
+    loadSubROM_A(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.subROM_A.length);
+        this.subROM_A.set(src.subarray(0, len));
+        this._subROM_ASize = src.length;
+        this.romLoaded.subA = true;
+        console.log(`Sub ROM Type-A loaded: ${src.length} bytes`);
+    }
+
+    /**
+     * Load Sub-system Type-B ROM (FM77AV, 8KB)
+     * @param {ArrayBuffer} data
+     */
+    loadSubROM_B(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.subROM_B.length);
+        this.subROM_B.set(src.subarray(0, len));
+        this._subROM_BSize = src.length;
+        this.romLoaded.subB = true;
+        console.log(`Sub ROM Type-B loaded: ${src.length} bytes`);
+    }
+
+    // =========================================================================
+    // Machine Type
+    // =========================================================================
+
+    /**
+     * Set the machine type. Must be called before reset().
+     * @param {string} type - 'fm7' or 'fm77av'
+     */
+    setMachineType(type) {
+        if (type !== MACHINE_FM7 && type !== MACHINE_FM77AV) {
+            console.warn(`Unknown machine type: ${type}, defaulting to fm7`);
+            type = MACHINE_FM7;
+        }
+        this._machineType = type;
+        console.log(`Machine type set to: ${type}`);
+    }
+
+    /**
+     * @returns {boolean} true if current machine type is FM77AV
+     */
+    get isFM77AV() {
+        return this._machineType === MACHINE_FM77AV;
     }
 
     // =========================================================================
@@ -822,24 +1449,87 @@ export class FM7 {
         this._gamepadState[0] = 0xFF;
         this._gamepadState[1] = 0xFF;
 
+        // FM77AV specific reset
+        if (this.isFM77AV) {
+            this._initiatorActive = true;  // Initiator ROM active at power-on
+            this._subMonitorType = SUB_MONITOR_C;  // Start with Type-C (FM-7 compatible)
+            // The Initiator ROM will write $FD13 to switch to Type-A
+            this._cgRomBank = 0;
+            this._nmiMaskSub = false;
+            this._subResetFlag = false;
+            this._vsyncFlag = true;
+            this._blankFlag = true;   // Blanking active at power-on
+            this._vblankCycles = 0;
+            this._analogPaletteAddr = 0;
+            this._analogPalette.fill(0);
+            // MMR reset
+            this._mmrEnabled = false;
+            this._mmrBank = 0;
+            this._mmrSegSelect = 0;
+            this._mmrRegs.fill(0);
+            // Default MMR mapping: identity (segment N → physical page N)
+            for (let bank = 0; bank < 2; bank++) {
+                for (let seg = 0; seg < MMR_NUM_SEGMENTS; seg++) {
+                    this._mmrRegs[bank * MMR_NUM_SEGMENTS + seg] = seg;
+                }
+            }
+            // Share analog palette reference with display
+            this.display.analogPalette = this._analogPalette;
+            // Enable FM77AV features in display (ALU, line drawing)
+            this.display.isAV = true;
+            // FM77AV: scan codes + break codes
+            this.keyboard._enableBreakCodes = true;
+            this.keyboard._useScanCodes = true;
+        } else {
+            this._initiatorActive = false;
+            this._subMonitorType = SUB_MONITOR_C;
+            this._cgRomBank = 0;
+            this.display.analogPalette = null;
+            this.display.isAV = false;
+            // FM-7: ASCII codes, no break codes
+            this.keyboard._enableBreakCodes = false;
+            this.keyboard._useScanCodes = false;
+        }
+
         // Reset all components
         this.display.reset();
         this.fdc.reset();
         this.keyboard.reset();
         this.psg.reset();
+        this.opn.reset();
         this.scheduler.reset();
 
-        // Set boot mode determines which boot ROM vector is used
-        // On FM-7, the boot ROM at $FE00-$FFFF determines the reset vector
+        // Re-apply keyboard mode after reset
+        if (this.isFM77AV) {
+            this.keyboard._enableBreakCodes = true;
+            this.keyboard._useScanCodes = true;
+        }
 
         // Reset CPUs - they read their reset vectors
+        // On FM-7: Boot ROM at $FE00-$FFFF determines the reset vector
+        // On FM77AV: Initiator ROM at $FE00-$FFFF runs first
         this.mainCPU.reset();
         this.subCPU.reset();
+        this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
 
         // Sub CPU is already set to running above; sync scheduler
         this.scheduler.setSubHalted(false);
 
-        console.log(`FM-7 reset (boot mode: ${bootMode})`);
+        // Log reset vector for debugging
+        const rvHi = this._mainRead(0xFFFE);
+        const rvLo = this._mainRead(0xFFFF);
+        const resetVec = (rvHi << 8) | rvLo;
+        console.log(`${this._machineType.toUpperCase()} reset (boot mode: ${bootMode})`);
+        console.log(`  Main CPU reset vector: $${resetVec.toString(16).toUpperCase().padStart(4, '0')}`);
+        console.log(`  Initiator: ${this._initiatorActive ? 'ACTIVE' : 'OFF'}, ROM loaded: ${this.romLoaded.initiate}`);
+        console.log(`  Sub monitor: Type-${['A','B','C'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
+
+        // Sub CPU reset vector
+        const srvHi = this._subRead(0xFFFE);
+        const srvLo = this._subRead(0xFFFF);
+        const subResetVec = (srvHi << 8) | srvLo;
+        console.log(`  Sub CPU reset vector: $${subResetVec.toString(16).toUpperCase().padStart(4, '0')}`);
+
     }
 
     // =========================================================================
@@ -858,11 +1548,16 @@ export class FM7 {
         this._fpsTime = performance.now();
         this._fpsCounter = 0;
 
-        // Start PSG audio on emulation start (user gesture context)
+        // Start audio on emulation start (user gesture context)
         if (!this.psg._audioCtx) {
             this.psg.startAudio();
         } else {
             this.psg.resumeAudio();
+        }
+        if (!this.opn._audioCtx) {
+            this.opn.startAudio();
+        } else {
+            this.opn.resumeAudio();
         }
 
         // Bind frame method
@@ -936,6 +1631,7 @@ export class FM7 {
         return {
             running: this._running,
             fps: this._currentFPS,
+            machineType: this._machineType,
             bootMode: this._bootMode,
             subHalted: this._subHalted,
             mainPC: this.mainCPU.pc || 0,
@@ -947,6 +1643,9 @@ export class FM7 {
                 this.fdc.disks[2] !== null,
                 this.fdc.disks[3] !== null,
             ],
+            // FM77AV specific
+            initiatorActive: this._initiatorActive,
+            subMonitorType: this._subMonitorType,
         };
     }
 
@@ -965,30 +1664,44 @@ export class FM7 {
     // FM-7 joystick is read via OPN ($FD15/$FD16) Port A/B only.
     // PSG ($FD0D/$FD0E) does not provide joystick input on FM-7.
 
+    /**
+     * Set the FM-7 joystick port (0 or 1) that the first browser gamepad maps to.
+     * @param {number} port - 0 for Port 1, 1 for Port 2
+     */
+    setJoystickPort(port) {
+        this._joystickPort = port & 1;
+    }
+
     /** Poll Gamepad API and update joystick state. */
     _pollGamepads() {
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        for (let i = 0; i < 2; i++) {
-            const gp = gamepads[i];
-            if (!gp) {
-                this._gamepadState[i] = 0xFF;
-                continue;
-            }
+        // Reset both ports
+        this._gamepadState[0] = 0xFF;
+        this._gamepadState[1] = 0xFF;
+
+        for (let gi = 0; gi < gamepads.length; gi++) {
+            const gp = gamepads[gi];
+            if (!gp || !gp.connected) continue;
+
             let state = 0xFF;  // active low: 1 = not pressed
             const deadzone = 0.3;
             const ax0 = gp.axes[0] || 0;
             const ax1 = gp.axes[1] || 0;
-            // D-pad buttons (standard mapping: 12=Up,13=Down,14=Left,15=Right)
-            if (ax1 < -deadzone || (gp.buttons[12] && gp.buttons[12].pressed)) state &= ~0x01; // Up
-            if (ax1 >  deadzone || (gp.buttons[13] && gp.buttons[13].pressed)) state &= ~0x02; // Down
-            if (ax0 < -deadzone || (gp.buttons[14] && gp.buttons[14].pressed)) state &= ~0x04; // Left
-            if (ax0 >  deadzone || (gp.buttons[15] && gp.buttons[15].pressed)) state &= ~0x08; // Right
-            // Triggers: A/X → Trigger1, B/Y → Trigger2
+            if (ax1 < -deadzone || (gp.buttons[12] && gp.buttons[12].pressed)) state &= ~0x01;
+            if (ax1 >  deadzone || (gp.buttons[13] && gp.buttons[13].pressed)) state &= ~0x02;
+            if (ax0 < -deadzone || (gp.buttons[14] && gp.buttons[14].pressed)) state &= ~0x04;
+            if (ax0 >  deadzone || (gp.buttons[15] && gp.buttons[15].pressed)) state &= ~0x08;
             if ((gp.buttons[0] && gp.buttons[0].pressed) ||
-                (gp.buttons[2] && gp.buttons[2].pressed)) state &= ~0x10; // Trigger 1
+                (gp.buttons[2] && gp.buttons[2].pressed)) state &= ~0x10;
             if ((gp.buttons[1] && gp.buttons[1].pressed) ||
-                (gp.buttons[3] && gp.buttons[3].pressed)) state &= ~0x20; // Trigger 2
-            this._gamepadState[i] = state;
+                (gp.buttons[3] && gp.buttons[3].pressed)) state &= ~0x20;
+
+            // Map browser gamepad to FM-7 port based on user selection
+            const port = (gi === 0) ? (this._joystickPort || 0) : (1 - (this._joystickPort || 0));
+            if (port < 2) {
+                this._gamepadState[port] = state;
+            }
+            if (gi >= 1) break; // Max 2 gamepads
         }
     }
 
@@ -998,6 +1711,7 @@ export class FM7 {
     destroy() {
         this.stop();
         this.psg.stopAudio();
+        this.opn.stopAudio();
         document.removeEventListener('keydown', this._keyDownHandler);
         document.removeEventListener('keyup', this._keyUpHandler);
         if (this._gamepadHandler) {

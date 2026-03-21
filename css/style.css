@@ -228,6 +228,13 @@ input[type="file"]::file-selector-button:hover {
     min-width: 0;
 }
 
+/* FM77AV ROM list separator */
+.rom-list-av label {
+    font-size: 0.72em;
+    padding-top: 4px;
+    border-top: 1px solid #2a2a4a;
+}
+
 /* Status tag */
 .status-tag {
     font-size: 0.7em;
@@ -259,6 +266,9 @@ input[type="file"]::file-selector-button:hover {
 }
 
 input[type="radio"] { accent-color: #00cc66; }
+/* Locked radio group: visually dimmed label but radio stays native */
+.radio-group.locked label { color: #6688aa; cursor: not-allowed; }
+.radio-group.locked input[type="radio"] { pointer-events: none; }
 
 /* Buttons */
 .btn-row {
@@ -414,7 +424,7 @@ button:disabled {
     margin-left: 4px;
 }
 
-/* ===== Input Monitor Panel ===== */
+/* ===== Floating Panels (Input Monitor & Debug) ===== */
 .input-panel {
     display: none;
     position: fixed;
@@ -430,6 +440,27 @@ button:disabled {
 }
 
 .input-panel.open { display: block; }
+
+#debugPanel {
+    right: auto;
+    left: 16px;
+    width: 260px;
+}
+
+.draggable-header {
+    cursor: grab;
+    user-select: none;
+}
+
+.draggable-header:active {
+    cursor: grabbing;
+}
+
+/* Analog Palette canvas */
+#analogPaletteCanvas {
+    display: block;
+    margin-top: 4px;
+}
 
 .ip-header {
     display: flex;
