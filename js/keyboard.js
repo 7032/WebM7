@@ -66,14 +66,14 @@ const FM7_KEY_BREAK   = 0x80;
  * $FD01 returns ASCII character codes.
  */
 const CODE_TO_FM7_ASCII = new Map([
-    // Letters (FM-7 returns uppercase ASCII)
-    ['KeyA', 0x41], ['KeyB', 0x42], ['KeyC', 0x43], ['KeyD', 0x44],
-    ['KeyE', 0x45], ['KeyF', 0x46], ['KeyG', 0x47], ['KeyH', 0x48],
-    ['KeyI', 0x49], ['KeyJ', 0x4A], ['KeyK', 0x4B], ['KeyL', 0x4C],
-    ['KeyM', 0x4D], ['KeyN', 0x4E], ['KeyO', 0x4F], ['KeyP', 0x50],
-    ['KeyQ', 0x51], ['KeyR', 0x52], ['KeyS', 0x53], ['KeyT', 0x54],
-    ['KeyU', 0x55], ['KeyV', 0x56], ['KeyW', 0x57], ['KeyX', 0x58],
-    ['KeyY', 0x59], ['KeyZ', 0x5A],
+    // Letters (FM-7: lowercase by default, CAPS OFF = lowercase)
+    ['KeyA', 0x61], ['KeyB', 0x62], ['KeyC', 0x63], ['KeyD', 0x64],
+    ['KeyE', 0x65], ['KeyF', 0x66], ['KeyG', 0x67], ['KeyH', 0x68],
+    ['KeyI', 0x69], ['KeyJ', 0x6A], ['KeyK', 0x6B], ['KeyL', 0x6C],
+    ['KeyM', 0x6D], ['KeyN', 0x6E], ['KeyO', 0x6F], ['KeyP', 0x70],
+    ['KeyQ', 0x71], ['KeyR', 0x72], ['KeyS', 0x73], ['KeyT', 0x74],
+    ['KeyU', 0x75], ['KeyV', 0x76], ['KeyW', 0x77], ['KeyX', 0x78],
+    ['KeyY', 0x79], ['KeyZ', 0x7A],
     // Digits
     ['Digit0', 0x30], ['Digit1', 0x31], ['Digit2', 0x32], ['Digit3', 0x33],
     ['Digit4', 0x34], ['Digit5', 0x35], ['Digit6', 0x36], ['Digit7', 0x37],
@@ -171,14 +171,14 @@ const CODE_TO_FM7_SCAN = new Map([
  * change the scan code, so these are not used.
  */
 const SHIFTED_OVERRIDE = new Map([
-    // Letters: Shift produces lowercase on FM-7
-    ['KeyA', 0x61], ['KeyB', 0x62], ['KeyC', 0x63], ['KeyD', 0x64],
-    ['KeyE', 0x65], ['KeyF', 0x66], ['KeyG', 0x67], ['KeyH', 0x68],
-    ['KeyI', 0x69], ['KeyJ', 0x6A], ['KeyK', 0x6B], ['KeyL', 0x6C],
-    ['KeyM', 0x6D], ['KeyN', 0x6E], ['KeyO', 0x6F], ['KeyP', 0x70],
-    ['KeyQ', 0x71], ['KeyR', 0x72], ['KeyS', 0x73], ['KeyT', 0x74],
-    ['KeyU', 0x75], ['KeyV', 0x76], ['KeyW', 0x77], ['KeyX', 0x78],
-    ['KeyY', 0x79], ['KeyZ', 0x7A],
+    // Letters: Shift produces uppercase on FM-7 (default is lowercase)
+    ['KeyA', 0x41], ['KeyB', 0x42], ['KeyC', 0x43], ['KeyD', 0x44],
+    ['KeyE', 0x45], ['KeyF', 0x46], ['KeyG', 0x47], ['KeyH', 0x48],
+    ['KeyI', 0x49], ['KeyJ', 0x4A], ['KeyK', 0x4B], ['KeyL', 0x4C],
+    ['KeyM', 0x4D], ['KeyN', 0x4E], ['KeyO', 0x4F], ['KeyP', 0x50],
+    ['KeyQ', 0x51], ['KeyR', 0x52], ['KeyS', 0x53], ['KeyT', 0x54],
+    ['KeyU', 0x55], ['KeyV', 0x56], ['KeyW', 0x57], ['KeyX', 0x58],
+    ['KeyY', 0x59], ['KeyZ', 0x5A],
     // Shifted digit row
     ['Digit1', 0x21], ['Digit2', 0x22], ['Digit3', 0x23], ['Digit4', 0x24],
     ['Digit5', 0x25], ['Digit6', 0x26], ['Digit7', 0x27], ['Digit8', 0x28],
@@ -225,7 +225,7 @@ export class Keyboard {
          * Keyboard IRQ mask.  Written via $FD02 bit 0.
          * 0 = IRQ enabled, 1 = IRQ masked.
          */
-        this._irqMask = 0;
+        this._irqMask = 1; // key IRQ masked on init (keyboard via sub CPU FIRQ)
 
         /**
          * Internal IRQ flag.  Set when a new key event arrives and
@@ -250,6 +250,11 @@ export class Keyboard {
          * FM-7 does not generate break codes; FM77AV does.
          */
         this._enableBreakCodes = false;
+
+        // --- LED toggle states ---
+        this.capsLock = false;
+        this.kanaMode = false;
+        this.insMode = false;
     }
 
     // ------------------------------------------------------------------
@@ -264,15 +269,16 @@ export class Keyboard {
      * @param {KeyboardEvent} event
      */
     keyDown(event) {
-        // Prevent default for mapped keys so the browser doesn't
-        // interfere (e.g. F5 reload, arrow scroll).
         const code = event.code;
 
-        // Ignore auto-repeat
-        if (this._heldKeys.has(code)) {
-            const t = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
-            if (t.has(code)) event.preventDefault();
-            return;
+        // Toggle LED keys (handle before mapping to prevent browser default)
+        if (code === 'CapsLock') {
+            this.capsLock = !this.capsLock;
+        } else if (code === 'Insert') {
+            this.insMode = !this.insMode;
+        } else if (code === 'AltRight' || code === 'KanaMode') {
+            // Alt-Right or Kana key → カナ toggle
+            this.kanaMode = !this.kanaMode;
         }
 
         const fm7Code = this._mapKey(code, event.shiftKey);
@@ -280,10 +286,7 @@ export class Keyboard {
 
         event.preventDefault();
         this._heldKeys.add(code);
-
-        // In scan code mode, modifiers (Ctrl/Shift) are separate keys
-        // No ASCII conversion needed - send raw scan code
-        this._pushKey(fm7Code & 0x7F);  // make (key down)
+        this._pushKey(fm7Code & 0x7F);
     }
 
     /**
@@ -328,21 +331,14 @@ export class Keyboard {
         switch (addr) {
             case 0xFD00:
                 // Keyboard status register:
-                // bit 7: 1 = key data available, 0 = no data
-                // bits 6-0: current key code (without break flag)
-                this._prepareNext();
-                if (this._keyAvailable) {
-                    return 0x80 | (this._currentKey & 0x7F);
-                }
-                return this._currentKey & 0x7F;
+                // bit 7: 0 = key data available, 1 = no data (ACTIVE LOW!)
+                return this._keyAvailable ? 0x7F : 0xFF;
 
             case 0xFD01:
-                // FM-7 I/O $FD01 read:
-                // Return key code (7-bit + break flag), clear IRQ
+                // Keyboard data register:
                 this._irqFlag = false;
                 this._keyAvailable = false;
                 const data = this._currentKey;
-                // Automatically load next key from buffer if available
                 this._prepareNext();
                 return data;
 
@@ -361,8 +357,8 @@ export class Keyboard {
         switch (addr) {
             case 0xFD02:
                 // Bit 0: IRQ mask (0 = enabled, 1 = masked)
-                this._irqMask = value & 0x01;
-                // If unmasking and there is a pending key, fire IRQ now
+                // bit=1 → IRQ enabled, bit=0 → IRQ masked
+                this._irqMask = (value & 0x01) ? 0 : 1;
                 if (this._irqMask === 0 && this._keyAvailable) {
                     this._assertIRQ();
                 }
@@ -430,9 +426,12 @@ export class Keyboard {
         this._buffer.length = 0;
         this._currentKey = 0x00;
         this._keyAvailable = false;
-        this._irqMask = 0;
+        this._irqMask = 1; // key IRQ masked on init (keyboard via sub CPU FIRQ)
         this._irqFlag = false;
         this._heldKeys.clear();
+        this.capsLock = false;
+        this.kanaMode = false;
+        this.insMode = false;
     }
 
     // ------------------------------------------------------------------

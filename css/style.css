@@ -250,6 +250,42 @@ input[type="file"]::file-selector-button:hover {
     color: #00cc66;
 }
 
+/* FDC access LED */
+.fdc-led {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #333;
+    border: 1px solid #555;
+    transition: background 0.05s, box-shadow 0.05s;
+}
+.fdc-led.active {
+    background: #ff4422;
+    box-shadow: 0 0 6px 2px rgba(255, 68, 34, 0.6);
+    border-color: #ff6644;
+}
+.fdc-led.motor {
+    background: #884422;
+    border-color: #996633;
+}
+
+/* Keyboard LED indicators */
+.kbd-led {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #333;
+    border: 1px solid #555;
+    transition: background 0.1s, box-shadow 0.1s;
+}
+.kbd-led.on {
+    background: #44dd44;
+    box-shadow: 0 0 5px 1px rgba(68, 221, 68, 0.5);
+    border-color: #66ee66;
+}
+
 /* Radio buttons */
 .radio-group {
     display: flex;
@@ -372,6 +408,33 @@ button:disabled {
     margin-top: 3px;
 }
 
+/* FM-7 Keyboard Layout */
+.fm7-kbd { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
+.fm7-kbd-row { display: flex; gap: 1px; }
+.fm7-key {
+    background: #1a2a3a; color: #8899aa; border: 1px solid #2a3a4a;
+    border-radius: 2px; font-size: 7px; width: 15px; height: 15px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
+    box-sizing: border-box;
+}
+.fm7-key-enter {
+    background: #1a2a3a; color: #8899aa; border: 1px solid #2a3a4a;
+    border-radius: 2px; font-size: 7px; width: 31px; height: 15px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
+    box-sizing: border-box;
+}
+.fm7-spacer { width: 15px; height: 15px; flex-shrink: 0; flex-grow: 0; }
+.fm7-key.space { flex: 1; }
+
+.fm7-key.active { background: #2a5a8a; color: #fff; border-color: #4ea8de; }
+.fm7-key.ctrl.active, .fm7-key.shift.active { background: #3a6a3a; border-color: #5c5; }
+.fm7-key.led { border-bottom: 2px solid #522; }
+.fm7-key.led.active { border-bottom-color: #e44; }
+.fm7-key.break-key { border-color: #c44; color: #c88; }
+.fm7-key.break-key.active { background: #8a2a2a; border-color: #f66; color: #fff; }
+
 /* ===== Site Title ===== */
 .site-title {
     font-size: 1.3em;
@@ -444,7 +507,7 @@ button:disabled {
 #debugPanel {
     right: auto;
     left: 16px;
-    width: 260px;
+    width: 336px;
 }
 
 .draggable-header {

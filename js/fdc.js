@@ -323,6 +323,9 @@ export class FDC {
         this.state = FDC_STATE.IDLE;
         this.commandType = 0;
 
+        // Access latch for UI LED (sticky until read and cleared)
+        this.accessLatch = false;
+
         // Command flags parsed from command byte
         this.cmdFlags = {
             h: false,       // Head load (Type I)
@@ -494,11 +497,18 @@ export class FDC {
 
         switch (addr) {
             case 0xFD18: // Command Register
-                this.commandReg = value;
+                // Only update commandReg if command will actually execute
+                // (Force Interrupt always executes; others only when not busy)
+                if ((value & 0xF0) === 0xD0 || !(this.statusReg & STATUS.BUSY)) {
+                    this.commandReg = value;
+                }
                 this._executeCommand(value);
                 break;
 
             case 0xFD19: // Track Register
+                if (this.trackReg !== value) {
+                    console.log(`FDC: trackReg written: ${this.trackReg} -> ${value} (head=${this.headPosition[this.currentDrive]})`);
+                }
                 this.trackReg = value;
                 break;
 
@@ -634,8 +644,20 @@ export class FDC {
 
         // If busy, ignore new commands (except Force Interrupt above)
         if (this.statusReg & STATUS.BUSY) {
+            console.warn(`FDC: cmd $${cmd.toString(16)} ignored (busy), state=${this.state} track=${this.trackReg}`);
             return;
         }
+
+        // Set access latch for UI LED
+        this.accessLatch = true;
+
+        // Log command execution
+        this._seekLogCount = 0;
+        const cmdNames = {0x00:'Restore',0x10:'Seek',0x20:'Step',0x30:'Step',
+            0x40:'StepIn',0x50:'StepIn',0x60:'StepOut',0x70:'StepOut',
+            0x80:'ReadSec',0x90:'ReadSecM',0xA0:'WriteSec',0xB0:'WriteSecM',
+            0xC0:'ReadAddr',0xE0:'ReadTrk',0xF0:'WriteTrk'};
+        console.log(`FDC: cmd $${cmd.toString(16)} (${cmdNames[cmdHigh]||'??'}) track=${this.trackReg} sector=${this.sectorReg} data=${this.dataReg} drive=${this.currentDrive} side=${this.currentSide}`);
 
         // Set BUSY
         this.statusReg = STATUS.BUSY;
@@ -682,9 +704,10 @@ export class FDC {
             this.cmdFlags.e = (cmd & 0x04) !== 0;
             this.cmdFlags.a0 = (cmd & 0x01) !== 0; // DAM flag for write
 
-            // Check drive ready
+            // No disk inserted: return Record Not Found (not NOT_READY).
+            // Drive is physically present; RNF indicates no readable data.
             if (!this.currentDisk || !this.currentDisk.loaded) {
-                this._completeCommand(STATUS.NOT_READY);
+                this._completeCommand(STATUS.RNF);
                 return;
             }
 
@@ -714,7 +737,7 @@ export class FDC {
             this.cmdFlags.e = (cmd & 0x04) !== 0;
 
             if (!this.currentDisk || !this.currentDisk.loaded) {
-                this._completeCommand(STATUS.NOT_READY);
+                this._completeCommand(STATUS.RNF);
                 return;
             }
 
@@ -772,9 +795,13 @@ export class FDC {
     /** Seek: move head to target track (in data register) */
     _beginSeek() {
         const target = this.dataReg;
-        const current = this.trackReg;
+        const headPos = this.headPosition[this.currentDrive];
 
-        if (target === current) {
+        // Use physical head position for comparison, not trackReg.
+        // The BIOS may write 0 to trackReg before Seek (absolute positioning),
+        // but the physical head is already at the correct track.
+        if (target === headPos) {
+            this.trackReg = target;
             if (this.cmdFlags.v) {
                 this.state = FDC_STATE.SEEK_VERIFY;
                 this.delayCycles = 30000;
@@ -784,7 +811,8 @@ export class FDC {
             return;
         }
 
-        this.stepDirection = (target > current) ? 1 : -1;
+        this.stepDirection = (target > headPos) ? 1 : -1;
+        this.trackReg = headPos; // Sync trackReg with actual head position
         this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
         this.state = FDC_STATE.SEEK_STEPPING;
     }
@@ -800,6 +828,11 @@ export class FDC {
     /** Process one step pulse during seek */
     _stepSeek() {
         const cmd = this.commandReg & 0xF0;
+        if (!this._seekLogCount) this._seekLogCount = 0;
+        if (this._seekLogCount < 5) {
+            this._seekLogCount++;
+            console.log(`FDC: _stepSeek cmd=$${cmd.toString(16)} trackReg=${this.trackReg} head=${this.headPosition[this.currentDrive]} data=${this.dataReg} dir=${this.stepDirection}`);
+        }
 
         if (cmd === 0x00) {
             // Restore
@@ -873,13 +906,9 @@ export class FDC {
             status |= STATUS.HEAD_ENGAGED;
         }
 
-        // Index pulse - simulate as present intermittently
-        // (Not critical for most software)
-
-        // Check drive ready
-        if (!this.currentDisk || !this.currentDisk.loaded) {
-            status |= STATUS.NOT_READY;
-        }
+        // Drive is always READY for Type I commands.
+        // On real FM-7, drives are physically present so NOT_READY never set.
+        // "No disk" is detected by RNF on Type II/III, not by NOT_READY.
 
         this._completeCommand(status);
     }
@@ -892,7 +921,7 @@ export class FDC {
     _startReadTransfer() {
         const disk = this.currentDisk;
         if (!disk) {
-            this._completeCommand(STATUS.NOT_READY);
+            this._completeCommand(STATUS.RNF);
             return;
         }
 
@@ -980,7 +1009,7 @@ export class FDC {
     _startWriteTransfer() {
         const disk = this.currentDisk;
         if (!disk) {
-            this._completeCommand(STATUS.NOT_READY);
+            this._completeCommand(STATUS.RNF);
             return;
         }
 
@@ -1051,7 +1080,7 @@ export class FDC {
     _startReadAddress() {
         const disk = this.currentDisk;
         if (!disk) {
-            this._completeCommand(STATUS.NOT_READY);
+            this._completeCommand(STATUS.RNF);
             return;
         }
 
@@ -1112,12 +1141,10 @@ export class FDC {
         this.drqFlag = false;
 
         // Build status as if Type I (track 0, etc.)
+        // Drive is always READY (physically present)
         this.statusReg = 0;
         if (this.headPosition[this.currentDrive] === 0) {
             this.statusReg |= STATUS.TRACK0;
-        }
-        if (!this.currentDisk || !this.currentDisk.loaded) {
-            this.statusReg |= STATUS.NOT_READY;
         }
 
         if (conditions !== 0) {
@@ -1145,6 +1172,7 @@ export class FDC {
 
         // Assert IRQ
         this.irqFlag = true;
+        console.log(`FDC: complete, status=$${this.statusReg.toString(16)} track=${this.trackReg} head=${this.headPosition[this.currentDrive]}`);
         if (this.onIRQ) {
             this.onIRQ();
         }
@@ -1163,7 +1191,8 @@ export class FDC {
         let status = 0;
 
         // Bit 7: 1 = drive not ready / motor off
-        if (!this.motorOn || !this.currentDisk || !this.currentDisk.loaded) {
+        // Drive is always physically present; only motor-off means not ready
+        if (!this.motorOn) {
             status |= 0x80;
         }
 
@@ -1211,5 +1240,6 @@ export class FDC {
         this.dataLength = 0;
         this.headPosition = [0, 0, 0, 0];
         this.readAddrSectorIndex = 0;
+        this.accessLatch = false;
     }
 }

@@ -32,6 +32,7 @@ js/
   cpu6809.js        MC6809 CPU エミュレーション
   display.js        画面描画（VRAM、ALU、ライン描画、パレット、320×200/640×200）
   fdc.js            フロッピーディスクコントローラ（MB8877、D77/2Dパーサ）
+  cmt.js            カセットテープコントローラ（T77パーサ、バイトオーダー自動検出、FSKスケール自動検出）
   keyboard.js       キーボード入力（FM-7 ASCIIモード / FM77AV スキャンコードモード）
   psg.js            PSG音源（AY-3-8910）
   opn.js            OPN FM音源（YM2203: 3ch FM合成 + SSG + タイマー）
