@@ -151,6 +151,18 @@ export class FM7 {
         this._blankFlag       = false;   // TRUE=horizontal blanking active
         this._vblankCycles    = 0;       // Cycle counter for VBlank period
         this._subNmiDelay     = 0;       // Cycles to delay NMI after sub CPU reset (INTR_SLOAD emulation)
+        // RTC (MS58321) via key encoder ($D431/$D432)
+        this._rtcRxBuf = [];      // Receive buffer (sub CPU reads $D431)
+        this._rtcAck = false;     // ACK flag (cleared on $D432 read)
+        this._rtcCmdBuf = [];     // Command accumulator
+        this._rtcState = 0;       // Protocol state
+
+        // BEEP
+        this._beepOsc = null;
+        this._beepGain = null;
+        this._beepTimer = null;
+        this._beepContinuous = false;
+
         // Analog palette (4096 entries, 12-bit RGB: B4:R4:G4)
         this._analogPalette     = new Uint16Array(4096);
         this._analogPaletteAddr = 0;     // Palette write address
@@ -176,6 +188,8 @@ export class FM7 {
 
         // IRQ / FIRQ flags for main CPU
         this._timerIRQ    = false;  // Timer IRQ pending (cleared by reading $FD03)
+        this._opnIrqLatch = false;  // OPN timer IRQ latch (edge-triggered, cleared by $FD03 read)
+        this._opnIrqPrev  = false;  // Previous OPN IRQ state for edge detection
         this._irqMaskReg  = 0;      // $FD02 keyboard IRQ mask (bit 0)
 
         // Emulation loop state
@@ -229,7 +243,9 @@ export class FM7 {
             const bankOff = this._mmrBankReg * MMR_NUM_SEGMENTS;
             const physPage = this._mmrRegs[bankOff + seg];
             // FM77AV MMR physical page mapping:
-            //   Pages 0x00-0x2F: extended RAM (192KB, separate from mainRAM)
+            //   Pages 0x00-0x0F: extended RAM bank 0 (64KB)
+            //   Pages 0x10-0x1F: sub CPU direct access when halted, else extended RAM bank 1
+            //   Pages 0x20-0x2F: extended RAM bank 2 (64KB)
             //   Pages 0x30-0x3F: main RAM (same physical memory as CPU direct access)
             if ((physPage & 0x30) === 0x30) {
                 const mainPage = physPage & 0x0F;
@@ -237,6 +253,11 @@ export class FM7 {
                     return this.mainRAM[(mainPage << 12) | (addr & 0x0FFF)];
                 }
                 // Identity mapping: fall through to normal map
+            } else if (this._subHalted && (physPage & 0xF0) === 0x10) {
+                // Sub CPU direct access: pages $10-$1F → sub CPU address space
+                // Physical page $1N maps to sub CPU address $N000-$NFFF
+                const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
+                return this._subRead(subAddr);
             } else {
                 const physAddr = (physPage << 12) | (addr & 0x0FFF);
                 if (physAddr < MMR_EXTENDED_RAM) {
@@ -320,7 +341,7 @@ export class FM7 {
             const seg = addr >> 12;
             const bankOff = this._mmrBankReg * MMR_NUM_SEGMENTS;
             const physPage = this._mmrRegs[bankOff + seg];
-            // Pages 0x30-0x3F: main RAM, pages 0x00-0x2F: extended RAM
+            // Pages 0x30-0x3F: main RAM
             if ((physPage & 0x30) === 0x30) {
                 const mainPage = physPage & 0x0F;
                 if (mainPage !== seg) {
@@ -328,7 +349,14 @@ export class FM7 {
                     return;
                 }
                 // Identity: fall through to normal write path
+            } else if (this._subHalted && (physPage & 0xF0) === 0x10) {
+                // Sub CPU direct access: pages $10-$1F → sub CPU address space
+                // Physical page $1N maps to sub CPU address $N000-$NFFF
+                const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
+                this._subWrite(subAddr, val);
+                return;
             } else {
+                // Pages 0x00-0x0F, 0x20-0x2F: extended RAM
                 const physAddr = (physPage << 12) | (addr & 0x0FFF);
                 if (physAddr < MMR_EXTENDED_RAM) {
                     this._extRAM[physAddr] = val;
@@ -397,23 +425,27 @@ export class FM7 {
         // bit 0: keyboard data available (active low: 0=data ready)
         //        NOT gated by IRQ mask - shows raw data availability
         // bit 2: timer IRQ (active low) - clears on read
-        // bit 3: printer IRQ (active low) - clears on read
+        // IRQ status ($FD03 read) - active low: 0 = pending, read clears flags
+        // bit 0: keyboard, bit 1: printer, bit 2: timer, bit 3: extended (OPN/DMA/PTM)
         if (addr === FD03_IRQ_STATUS) {
             let status = 0xFF;
-            // bit 0: keyboard data available (active low)
             if (this.keyboard._keyAvailable) status &= ~0x01;
             if (this._timerIRQ) {
                 status &= ~0x04;
                 this._timerIRQ = false;
+            }
+            // bit 3: extended interrupt (OPN timer A/B overflow)
+            // Reading $FD03 clears the edge-triggered IRQ latch.
+            if (this._opnIrqLatch) {
+                status &= ~0x08;
+                this._opnIrqLatch = false;
             }
             return status;
         }
 
         // $FD04: Sub CPU status (BUSY, attention, break key)
         if (addr === FD04_IRQ_MASK) {
-            // No carry-clear workaround: $FD76 loop exits naturally
-            // via FIRQ-buffered data ($D004) or IRQ signal ($D000)
-            let ret = (this._subBusy || this._subHalted) ? 0xFF : 0x7F;  // bit 7 = BUSY (includes HALT state)
+            let ret = this._subBusy ? 0xFF : 0x7F;  // bit 7 = BUSY only (not HALT)
             if (this._subAttn) {
                 ret &= ~0x01;  // bit 0 = attention (active low)
                 this._subAttn = false;  // Clear attention on read
@@ -428,15 +460,9 @@ export class FM7 {
         }
 
         // Sub CPU status ($FD05 read)
-        // FM-7 I/O $FD05 read: sub CPU control status
-        // Default 0xFF; bit 7 cleared when NOT busy; bit 0 = EXTDET (peripheral)
+        // bit 7 = BUSY only (not HALT). bit 0 = EXTDET.
         if (addr === FD05_SUB_CTRL) {
-            // No carry-clear workaround: $FD76 loop exits naturally
-            // via FIRQ-buffered data ($D004) or IRQ signal ($D000)
-            let ret = 0xFF;
-            if (!this._subBusy && !this._subHalted) ret &= ~0x80;  // bit 7: 0 = not busy (HALT also shows as busy)
-            // bit 0: EXTDET (FDC/OPN present) - always set for FM-7 with FDC
-            ret &= ~0x01;
+            let ret = this._subBusy ? 0xFE : 0x7E;  // bit7=BUSY, bit0=0 (EXTDET present)
             return ret;
         }
 
@@ -480,6 +506,19 @@ export class FM7 {
             // bit 0: vsync_flag (0 when NOT in vsync)
             if (!this._vsyncFlag) ret &= ~0x01;
             return ret;
+        }
+
+        // FM77AV: $FD30-$FD34 read — analog palette read-back
+        if (this.isFM77AV && addr >= 0xFD30 && addr <= 0xFD34) {
+            const idx = this._analogPaletteAddr & 0xFFF;
+            const entry = this._analogPalette[idx];
+            switch (addr) {
+                case 0xFD30: return (this._analogPaletteAddr >> 8) & 0x0F;
+                case 0xFD31: return this._analogPaletteAddr & 0xFF;
+                case 0xFD32: return (entry >> 8) & 0x0F;  // Blue
+                case 0xFD33: return (entry >> 4) & 0x0F;  // Red
+                case 0xFD34: return entry & 0x0F;          // Green
+            }
         }
 
         // FDC registers ($FD18-$FD1F)
@@ -551,6 +590,11 @@ export class FM7 {
                 // $FD80-$FD8F: read segment registers for bank selected by $FD90
                 return this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + (addr - 0xFD80)];
             }
+            // $FD92: Indirect segment register read
+            if (addr === FD92_MMR_SEG) {
+                const seg = this._mmrSegSelect & 0x0F;
+                return this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + seg];
+            }
             return 0xFF;
         }
 
@@ -588,11 +632,20 @@ export class FM7 {
             return;
         }
 
-        // $FD03 write: BEEP/speaker control
-        // bit 0: speaker on/off, bit 6: single BEEP, bit 7: continuous BEEP
-        // Note: timer IRQ is cleared by READING $FD03, not writing.
+        // $FD03 write: BEEP/speaker control (§7.1)
+        // bit 7: continuous BEEP, bit 6: single BEEP (205ms), bit 0: speaker on/off
         if (addr === FD03_IRQ_STATUS) {
-            // BEEP/speaker control (sound not yet implemented)
+            if (val & 0x40) {
+                // Single BEEP: 205ms tone at ~2kHz
+                this._beepStart(205);
+            }
+            if (val & 0x80) {
+                // Continuous BEEP on
+                this._beepStart(-1); // -1 = continuous
+            } else if (this._beepContinuous) {
+                // Continuous BEEP off (bit7 cleared)
+                this._beepStop();
+            }
             return;
         }
 
@@ -605,12 +658,13 @@ export class FM7 {
             const cancelReq = (val & 0x40) !== 0;
 
             if (haltReq) {
-                // HALT request
+                // HALT request — immediate halt + set BUSY.
+                // On real hardware, the $FD05 write triggers IRQ and the sub CPU's
+                // IRQ handler sets BUSY via $D40A before halting. We simulate the
+                // end result: HALT + BUSY both set atomically.
                 if (!this._subHalted) {
                     this._subHalted = true;
-                    // Note: BUSY flag is NOT set by HALT. $FD04/$FD05 reads
-                    // reflect _subHalted separately. _subBusy is only controlled
-                    // by sub CPU reading/writing $D40A.
+                    this._subBusy = true;   // Sub CPU would set this via IRQ handler
                     this.scheduler.setSubHalted(true);
                 }
             } else {
@@ -623,8 +677,9 @@ export class FM7 {
 
             if (cancelReq) {
                 this._subCancel = true;
-                this.subCPU.irq();
             }
+            // Every $FD05 write triggers sub CPU IRQ.
+            this.subCPU.irq();
             return;
         }
 
@@ -644,6 +699,13 @@ export class FM7 {
             this._fd10Reg = val;
             if (this._initiatorActive) {
                 this._initiatorActive = false;
+                // After Initiator hands off, F-BASIC expects FM-7 compatible
+                // keyboard (ASCII codes). Switch keyboard to ASCII mode so
+                // Type-C ROM (or F-BASIC's own console) receives correct codes.
+                if (this._bootMode === 'basic') {
+                    this.keyboard._useScanCodes = false;
+                    this.keyboard._enableBreakCodes = false;
+                }
                 console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
             }
             return;
@@ -687,12 +749,23 @@ export class FM7 {
             this._nmiMaskSub = false;
             this._blankFlag = true;  // Blanking active after reset
 
+            // Keyboard mode: Type-A/B ROMs have internal scan-to-ASCII
+            // conversion, so the keyboard sends scan codes. Type-C ROM
+            // expects pre-converted ASCII codes (FM-7 compatible).
+            if (bank === SUB_MONITOR_C) {
+                this.keyboard._useScanCodes = false;
+                this.keyboard._enableBreakCodes = false;
+            } else {
+                this.keyboard._useScanCodes = true;
+                this.keyboard._enableBreakCodes = true;
+            }
+
             this.subCPU.reset();
             this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
             this.scheduler.setSubHalted(false);
             if (oldType !== bank) {
                 console.log('FM77AV: Sub ROM bank → Type-' +
-                    ['C', 'A', 'B', 'CG'][bank] + ', sub CPU reset');
+                    ['A', 'B', 'C', 'CG'][bank] + ', sub CPU reset');
             }
             return;
         }
@@ -767,9 +840,14 @@ export class FM7 {
             return;
         }
 
-        // $FD15: OPN command (BDIR/BC1 protocol)
-        //   $00 = Inactive, $01 = Read, $02 = Write, $03 = Address Latch
+        // $FD15: OPN command register (FM7 Programmers Guide §7.3)
+        //   bit1:0 (BDIR/BC1): $00=Inactive, $01=Read reg, $02=Write reg, $03=Address Latch
+        //   bit2: Status read — loads OPN status register onto $FD16 data bus
         if (addr === 0xFD15) {
+            // bit2: OPN status read mode — demo reads status via STA #$04,$FD15 / LDA $FD16
+            if (val & 0x04) {
+                this._opnDataBus = this.opn.readStatus();
+            }
             switch (val & 0x03) {
                 case 0x03: // Address Latch: latch data bus as register number
                     this._opnAddrLatch = this._opnDataBus & 0xFF;
@@ -778,36 +856,11 @@ export class FM7 {
                     this.opn.writeReg(this._opnAddrLatch, this._opnDataBus);
                     // Also keep local copy for port A/B joystick reads
                     this._opnRegs[this._opnAddrLatch] = this._opnDataBus;
-                    // SSG registers ($00-$0F): forward to PSG for audio output
-                    // OPN's SSG runs at masterClock/2, while standalone PSG runs
-                    // at masterClock. Compensate by doubling tone/noise/envelope periods.
+                    // SSG registers ($00-$0F): forward to PSG for audio output.
+                    // PSG step() now converts CPU cycles to PSG clock internally,
+                    // so no period scaling is needed — just forward raw values.
                     if (this._opnAddrLatch <= 0x0F) {
-                        const reg = this._opnAddrLatch;
-                        const dat = this._opnDataBus;
-                        // Store raw value in PSG regs first
-                        this.psg.regs[reg] = dat;
-                        // Recalculate periods with 2x multiplier for OPN SSG clock
-                        switch (reg) {
-                            case 0: case 1:
-                                this.psg._tonePeriod[0] = (((this.psg.regs[1] & 0x0F) << 8) | this.psg.regs[0]) * 2;
-                                break;
-                            case 2: case 3:
-                                this.psg._tonePeriod[1] = (((this.psg.regs[3] & 0x0F) << 8) | this.psg.regs[2]) * 2;
-                                break;
-                            case 4: case 5:
-                                this.psg._tonePeriod[2] = (((this.psg.regs[5] & 0x0F) << 8) | this.psg.regs[4]) * 2;
-                                break;
-                            case 6:
-                                this.psg._noisePeriod = (dat & 0x1F) * 2;
-                                break;
-                            case 11: case 12:
-                                this.psg._envPeriod = (this.psg.regs[11] | (this.psg.regs[12] << 8)) * 2;
-                                break;
-                            default:
-                                // Mixer, volume, envelope shape: no period adjustment needed
-                                this.psg._writeReg(reg, dat);
-                                break;
-                        }
+                        this.psg._writeReg(this._opnAddrLatch, this._opnDataBus);
                     }
                     break;
                 case 0x01: { // Read: load latched register onto data bus
@@ -865,7 +918,14 @@ export class FM7 {
                 this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + (addr - 0xFD80)] = val;
                 return;
             }
-            // $FD91-$FD9F (except $FD90, $FD93): ignored
+            // $FD92: Indirect segment register write
+            // Writes to the segment selected by $FD93 bits 3-0, in the bank selected by $FD90
+            if (addr === FD92_MMR_SEG) {
+                const seg = this._mmrSegSelect & 0x0F;
+                this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + seg] = val;
+                return;
+            }
+            // $FD91, $FD94-$FD9F: unused
             return;
         }
 
@@ -931,6 +991,9 @@ export class FM7 {
                 // $D404: Set attention flag, trigger main CPU FIRQ
                 this._subAttn = true;
                 this.mainCPU.firq();
+            } else if (result.sideEffect === 'beep') {
+                // $D403: Sub CPU BEEP trigger (single 205ms tone)
+                this._beepStart(205);
             } else if (result.sideEffect === 'busyOff') {
                 // $D40A: Clear BUSY flag
                 this._subBusy = false;
@@ -979,17 +1042,21 @@ export class FM7 {
                 }
                 return ret;
             }
-            // $D431: Key encoder data receive
+            // $D431: Key encoder data receive (RTC MS58321 serial data)
             if (addr === 0xD431) {
-                return 0xFF;  // No data in receive buffer
+                if (this._rtcRxBuf.length > 0) {
+                    return this._rtcRxBuf.shift();
+                }
+                return 0xFF;
             }
             // $D432: Key encoder status
             // bit 7: RXRDY (0 = data ready in receive buffer)
-            // bit 0: ACK (0 = ACK signal active)
-            // After reset: no data ready (bit 7=1), ACK idle (bit 0=1) => 0xFF
+            // bit 0: ACK (0 = ACK signal active after command processed)
             if (addr === 0xD432) {
-                // No pending receive data (RXRDY=1), ACK not active (bit0=1)
-                return 0xFF;
+                let val = 0xFF;
+                if (this._rtcRxBuf.length > 0) val &= ~0x80; // RXRDY: data available
+                if (this._rtcAck) { val &= ~0x01; this._rtcAck = false; }
+                return val;
             }
             // $D433-$D43F: Other FM77AV registers
             return 0xFF;
@@ -1137,7 +1204,11 @@ export class FM7 {
                 this.display.miscReg = val;
                 return;
             }
-            // $D431: Key encoder data send (acknowledge commands from sub CPU)
+            // $D431: Key encoder data send — RTC commands from sub CPU
+            if (addr === 0xD431) {
+                this._rtcProcessCommand(val);
+                return;
+            }
             // $D432: Key encoder status (read-only, writes ignored)
             // $D433-$D43F: Other FM77AV registers
             return;
@@ -1213,12 +1284,11 @@ export class FM7 {
                     this._subNmiDelay -= mainElapsed;
                 }
 
-                // HBlank timing: horizontal blanking toggles each line
-                // Line period ~78 cycles (63.5μs * 1.2288MHz)
-                // HBlank portion: last ~15 cycles of each line
+                // HBlank timing (§12.1): line period ≈63.5μs (127 cycles @2MHz)
+                // HBlank = 24μs (48 cycles), display = 39-40μs (79 cycles)
                 if (this.isFM77AV) {
-                    this._hblankCounter = ((this._hblankCounter || 0) + mainElapsed) % 78;
-                    this._blankFlag = this._hblankCounter >= 63;
+                    this._hblankCounter = ((this._hblankCounter || 0) + mainElapsed) % 127;
+                    this._blankFlag = this._hblankCounter >= 79;
                 }
 
                 // PSG audio synthesis (generates samples into ring buffer)
@@ -1260,22 +1330,20 @@ export class FM7 {
             this._timerIRQ = true;
         });
 
-        // VSync event (60 Hz) → NMI to sub CPU + vsync timing
-        this.scheduler.addVSyncEvent(() => {
+        // VSync event (66.1 Hz, ~15120μs frame period per FM7 Programmers Guide §12.1)
+        this.scheduler.addEvent('vsync', 15120, () => {
             this.display.frameCount++;
 
             // Start vertical blanking period
-            // vsync_flag: TRUE=active display, FALSE=VBlank
             this._vsyncFlag = false;  // Enter VBlank
-            // VBlank lasts ~1200us out of 16667us frame
-            // We'll use a cycle counter to end VBlank
-            this._vblankCycles = usToCycles(1200);
+            // VBlank lasts ~510μs (VSYNC pulse)
+            this._vblankCycles = usToCycles(510);
+        });
 
+        // Sub CPU NMI timer (50 Hz = 20ms, independent of VSync per §4.2)
+        this.scheduler.addEvent('subnmi', 20000, () => {
             if (!this._subHalted && !(this.isFM77AV && this._nmiMaskSub)
                 && this._subNmiDelay <= 0) {
-                // Edge-triggered NMI: only deliver if not already pending
-                // Real 6809 NMI uses a latch that is set on rising edge and
-                // cleared when NMI is taken. Don't re-assert during handler.
                 if (!(this.subCPU.intr & 0x01)) {
                     this.subCPU.nmi();
                 }
@@ -1298,18 +1366,26 @@ export class FM7 {
         // FDC IRQ: check FDC's own flag directly (cleared by reading $FD18)
         if (this.fdc.irqFlag) mainIrq = true;
 
-        // OPN Timer IRQ: Timer A/B flags generate IRQ when enabled
-        if (this.opn.timerAFlag || this.opn.timerBFlag) mainIrq = true;
+        // OPN Timer IRQ: routed through $FD03 bit3 "extended interrupt"
+        // (FM7 Programmers Guide §3.1). Edge-triggered latch: set on new
+        // OPN timer overflow, cleared by reading $FD03. This prevents the
+        // level-triggered OPN status flag from causing continuous IRQ re-entry.
+        {
+            const opnActive = (this.opn.timerAFlag && this.opn._timerAIRQ) ||
+                              (this.opn.timerBFlag && this.opn._timerBIRQ);
+            if (opnActive && !this._opnIrqPrev) this._opnIrqLatch = true;
+            this._opnIrqPrev = opnActive;
+            if (this._opnIrqLatch) mainIrq = true;
+        }
 
         if (mainIrq) this.mainCPU.irq();
 
-        // Sub CPU FIRQ: keyboard-driven
-        if (this.keyboard._irqMask) {
-            if (this.keyboard._irqFlag) {
-                this.subCPU.intr |= 0x02; // INTR_FIRQ
-            } else {
-                this.subCPU.intr &= ~0x02;
-            }
+        // Sub CPU FIRQ: keyboard-driven (active whenever key data available)
+        // On real FM-7, the keyboard encoder IC generates FIRQ to sub CPU
+        // independently of the main CPU IRQ mask ($FD02). FIRQ is asserted
+        // as long as keyboard data is available, regardless of mask setting.
+        if (this.keyboard._keyAvailable) {
+            this.subCPU.intr |= 0x02; // INTR_FIRQ
         } else {
             this.subCPU.intr &= ~0x02;
         }
@@ -1529,6 +1605,7 @@ export class FM7 {
             type = MACHINE_FM7;
         }
         this._machineType = type;
+        this.opn.setAVMode(type === MACHINE_FM77AV);
         console.log(`Machine type set to: ${type}`);
     }
 
@@ -1614,6 +1691,8 @@ export class FM7 {
 
         // Reset I/O state
         this._subHalted   = false;  // Sub CPU runs after reset
+        this._subHaltRequest = false;
+        this._subHaltDeferred = 0;
         this._subBusy     = true;   // BUSY set on reset (sub CPU clears via $D40A read during init)
         this._subCancel   = false;
         this._subAttn     = false;
@@ -1695,10 +1774,18 @@ export class FM7 {
         // On real FM-7 without disk controller, the boot ROM at $FE00 simply
         // jumps to F-BASIC. With disk controller in BASIC mode, the DIP switch
         // or boot ROM variant skips disk boot.
-        if (!this.isFM77AV && bootMode === 'basic' && this.romLoaded.bootBas) {
-            // For BASIC boot: use boot_bas.rom ($FE00-$FFDF code area)
-            this._basicBootStub = new Uint8Array(BOOT_ROM_SIZE);
-            this._basicBootStub.set(this.bootBasROM);
+        if (bootMode === 'basic' && this.romLoaded.bootBas) {
+            if (this.isFM77AV) {
+                // FM77AV BASIC boot: Initiator ROM handles boot device selection
+                // via $FD0B bit0 (1=BASIC). Initiator reads $FD0B and branches
+                // to F-BASIC cold start instead of disk boot.
+                // No stub needed — Initiator ROM + $FD0B is sufficient.
+                this._basicBootStub = null;
+            } else {
+                // FM-7 BASIC boot: use boot_bas.rom ($FE00-$FFDF code area)
+                this._basicBootStub = new Uint8Array(BOOT_ROM_SIZE);
+                this._basicBootStub.set(this.bootBasROM);
+            }
         } else {
             this._basicBootStub = null;
         }
@@ -1827,11 +1914,9 @@ export class FM7 {
         // Poll gamepads for joystick input
         this._pollGamepads();
 
-        // Run scheduler for one frame (~16667 microseconds = 60fps)
+        // Run scheduler for one browser frame (~16667μs = 60 Hz).
+        // Internal VSync event fires at 66.1 Hz (15120μs) independently.
         // CMT turbo: run 50x faster only when actively reading a tape
-        // (motor ON AND tape loaded). Without the loaded check, stray
-        // $FD00 writes during FM77AV Initiator/BIOS init could trigger
-        // 50x speed and break timing-sensitive boot sequences.
         const cmtTurbo = (this.cmt.motor && this.cmt.loaded) ? 50 : 1;
         try {
             this.scheduler.exec(16667 * cmtTurbo);
@@ -1984,6 +2069,110 @@ export class FM7 {
             }
             if (gi >= 1) break; // Max 2 gamepads
         }
+    }
+
+    // =========================================================================
+    // RTC (MS58321) via Key Encoder
+    // =========================================================================
+
+    /**
+     * Process a command byte sent by sub CPU to key encoder ($D431 write).
+     * The RTC is accessed through a simple serial protocol:
+     * - Command $00: reset
+     * - Command $01-$0C: read RTC register (returns BCD nibble)
+     * - Command $11-$1C: write RTC register
+     */
+    _rtcProcessCommand(val) {
+        // Simple implementation: respond to RTC read commands
+        // by returning current host time in BCD format.
+        // Registers: 0=sec1, 1=sec10, 2=min1, 3=min10, 4=hr1, 5=hr10,
+        //            6=weekday, 7=day1, 8=day10, 9=month1, 10=month10,
+        //            11=year1, 12=year10
+        const now = new Date();
+        const rtcRegs = [
+            now.getSeconds() % 10,       // S1
+            Math.floor(now.getSeconds() / 10), // S10
+            now.getMinutes() % 10,       // M1
+            Math.floor(now.getMinutes() / 10), // M10
+            now.getHours() % 10,         // H1
+            Math.floor(now.getHours() / 10),   // H10
+            now.getDay(),                // weekday (0=Sun)
+            now.getDate() % 10,          // D1
+            Math.floor(now.getDate() / 10),    // D10
+            (now.getMonth() + 1) % 10,   // Mon1
+            Math.floor((now.getMonth() + 1) / 10), // Mon10
+            (now.getFullYear() % 100) % 10,    // Y1
+            Math.floor((now.getFullYear() % 100) / 10), // Y10
+        ];
+
+        if (val >= 0x01 && val <= 0x0D) {
+            // Read register: return BCD nibble
+            const reg = val - 1;
+            if (reg < rtcRegs.length) {
+                this._rtcRxBuf.push(rtcRegs[reg] & 0x0F);
+            } else {
+                this._rtcRxBuf.push(0);
+            }
+            this._rtcAck = true;
+        } else if (val >= 0x11 && val <= 0x1D) {
+            // Write register: accept but ignore (host clock is read-only)
+            this._rtcAck = true;
+        } else if (val === 0x00) {
+            // Reset
+            this._rtcRxBuf = [];
+            this._rtcAck = true;
+        }
+    }
+
+    // =========================================================================
+    // BEEP Sound
+    // =========================================================================
+
+    /**
+     * Start BEEP tone.
+     * @param {number} durationMs - Duration in ms, or -1 for continuous
+     */
+    _beepStart(durationMs) {
+        // Use PSG's AudioContext if available
+        const ctx = this.psg._audioCtx;
+        if (!ctx) return;
+
+        this._beepStop(); // Stop any existing beep
+
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 2400; // FM-7 BEEP frequency ~2.4kHz
+        gain.gain.value = 0.15;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+
+        this._beepOsc = osc;
+        this._beepGain = gain;
+        this._beepContinuous = (durationMs < 0);
+
+        if (durationMs > 0) {
+            this._beepTimer = setTimeout(() => this._beepStop(), durationMs);
+        }
+    }
+
+    /** Stop BEEP tone. */
+    _beepStop() {
+        if (this._beepOsc) {
+            try { this._beepOsc.stop(); } catch (e) { /* ignore */ }
+            this._beepOsc.disconnect();
+            this._beepOsc = null;
+        }
+        if (this._beepGain) {
+            this._beepGain.disconnect();
+            this._beepGain = null;
+        }
+        if (this._beepTimer) {
+            clearTimeout(this._beepTimer);
+            this._beepTimer = null;
+        }
+        this._beepContinuous = false;
     }
 
     /**

@@ -77,8 +77,8 @@
                 </div>
             </div>
             <div class="btn-row">
-                <button id="startBtn" class="btn-start">Start</button>
-                <button id="stopBtn" class="btn-stop" disabled>Stop</button>
+                <button id="playStopBtn" class="btn-start">Start</button>
+                <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
             </div>
         </div>
@@ -146,6 +146,7 @@
             <label>Drive 0:</label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile" accept=".d77,.D77,.2d,.2D">
+                <button id="diskEjectBtn" style="font-size:10px;padding:1px 6px;">Eject</button>
                 <span class="status-tag" id="diskStatus">--</span>
             </div>
             <div class="fdc-indicator" style="display:flex;align-items:center;gap:8px;margin-top:6px;">
@@ -166,6 +167,7 @@
             <h3>Tape Image</h3>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="tapeFile" accept=".t77,.T77">
+                <button id="tapeEjectBtn" style="font-size:10px;padding:1px 6px;">Eject</button>
                 <span class="status-tag" id="tapeStatus">--</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
@@ -330,8 +332,8 @@
         <p><strong>ディスク</strong> — D77 形式のディスクイメージを「Drive 0」「Drive 1」にセットできます。</p>
         <p><strong>テープ</strong> — T77 形式のカセットテープイメージを「Tape Image」にセットできます。</p>
         <ul>
-        <li>T77 は XM7 エミュレータのテープイメージ形式で、ビッグエンディアン（XM7生成）とリトルエンディアン（WAV2T77生成）の両方に自動対応します</li>
-        <li><strong>REW</strong> ボタンでテープを巻き戻し</li>
+        <li>T77 テープイメージ形式に対応。ビッグエンディアン・リトルエンディアンの両バイトオーダーを自動検出します</li>
+        <li><strong>REW</strong> ボタンでテープを巻き戻し、<strong>Eject</strong> ボタンで取り出し</li>
         <li>テープ読み込み中（モーターON時）はエミュレータが自動的に高速化され、高速でロードされます</li>
         <li>BASICモードで起動後、<code>RUN ""</code>、<code>LOAD</code>、<code>LOADM</code> コマンドでテープからプログラムを読み込めます</li>
         </ul>
@@ -340,7 +342,7 @@
         <ol>
         <li><strong>Machine</strong> を選択（FM-7 / FM77AV）</li>
         <li><strong>Boot Mode</strong> を選択（DOS / BASIC）</li>
-        <li><strong>Start</strong> ボタンを押す</li>
+        <li><strong>Start</strong> ボタンを押す（実行中は Stop に変わり停止可能。Pause で一時停止・Resume で再開）</li>
         </ol>
         <p>画面（Screen）をクリックするとキーボード入力がエミュレータに渡ります。</p>
 
@@ -364,9 +366,9 @@
         <h3>右側 — サイドパネル</h3>
         <table>
         <tr><th>セクション</th><th>内容</th></tr>
-        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、Joystick ポート（Port 1 / Port 2）の選択と Start / Stop / Reset ボタン</td></tr>
+        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、Joystick ポート（Port 1 / Port 2）の選択。Start/Stop（トグル）、Pause/Resume、Reset（即座に再起動）ボタン</td></tr>
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功</td></tr>
-        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット</td></tr>
+        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し</td></tr>
         <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示、パレット、PSG レジスタ</td></tr>
         </table>
 
@@ -497,9 +499,11 @@ const romBootDosInput = document.getElementById('romBootDos');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
 const diskFileInput   = document.getElementById('diskFile');
-const startBtn        = document.getElementById('startBtn');
-const stopBtn         = document.getElementById('stopBtn');
+const playStopBtn     = document.getElementById('playStopBtn');
+const pauseBtn        = document.getElementById('pauseBtn');
 const resetBtn        = document.getElementById('resetBtn');
+const diskEjectBtn    = document.getElementById('diskEjectBtn');
+const tapeEjectBtn    = document.getElementById('tapeEjectBtn');
 
 const romStatusEl     = document.getElementById('romStatus');
 const statusFBasicEl  = document.getElementById('statusFBasic');
@@ -824,45 +828,100 @@ cmtRewindBtn.addEventListener('click', () => {
 // Control Buttons
 // =========================================================================
 
-startBtn.addEventListener('click', () => {
+// Emulator states: 'stopped' | 'running' | 'paused'
+let emuState = 'stopped';
+
+function setEmuState(state) {
+    emuState = state;
+    switch (state) {
+        case 'stopped':
+            playStopBtn.textContent = 'Start';
+            playStopBtn.className = 'btn-start';
+            pauseBtn.disabled = true;
+            pauseBtn.textContent = 'Pause';
+            resetBtn.disabled = true;
+            setControlsLocked(false);
+            stateValEl.textContent = 'Stopped';
+            stateValEl.style.color = '#cc6666';
+            break;
+        case 'running':
+            playStopBtn.textContent = 'Stop';
+            playStopBtn.className = 'btn-stop';
+            pauseBtn.disabled = false;
+            pauseBtn.textContent = 'Pause';
+            resetBtn.disabled = false;
+            setControlsLocked(true);
+            stateValEl.textContent = 'Running';
+            stateValEl.style.color = '#00cc66';
+            break;
+        case 'paused':
+            playStopBtn.textContent = 'Stop';
+            playStopBtn.className = 'btn-stop';
+            pauseBtn.disabled = false;
+            pauseBtn.textContent = 'Resume';
+            resetBtn.disabled = false;
+            setControlsLocked(true);
+            stateValEl.textContent = 'Paused';
+            stateValEl.style.color = '#cccc00';
+            break;
+    }
+}
+
+// ▶/■ Play/Stop button
+playStopBtn.addEventListener('click', () => {
+    if (emuState === 'stopped') {
+        // Start: reset + run
+        updateMachineType();
+        const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
+        fm7.setJoystickPort(joyPort);
+        const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
+        fm7.reset(bootMode);
+        fm7.start(canvas);
+        setEmuState('running');
+    } else {
+        // Stop: back to initial state
+        fm7.stop();
+        setEmuState('stopped');
+    }
+});
+
+// ⏸ Pause/Resume toggle
+pauseBtn.addEventListener('click', () => {
+    if (emuState === 'running') {
+        fm7.stop();
+        setEmuState('paused');
+    } else if (emuState === 'paused') {
+        fm7.start(canvas);
+        setEmuState('running');
+    }
+});
+
+// Disk eject
+diskEjectBtn.addEventListener('click', () => {
+    fm7.fdc.ejectDisk(0);
+    diskFileInput.value = '';
+    diskStatus.textContent = '--';
+    diskStatus.style.color = '';
+});
+
+// Tape eject
+tapeEjectBtn.addEventListener('click', () => {
+    fm7.cmt.eject();
+    tapeFileEl.value = '';
+    tapeStatus.textContent = '--';
+    tapeStatus.style.color = '';
+});
+
+// Reset: stop → reset → immediately restart
+resetBtn.addEventListener('click', () => {
+    fm7.stop();
     updateMachineType();
-    // Apply joystick port setting on start
     const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
     fm7.setJoystickPort(joyPort);
     const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
     fm7.reset(bootMode);
     fm7.start(canvas);
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    setControlsLocked(true);
-    stateValEl.textContent = 'Running';
-    stateValEl.style.color = '#00cc66';
-});
-
-stopBtn.addEventListener('click', () => {
-    fm7.stop();
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    setControlsLocked(false);
-    stateValEl.textContent = 'Stopped';
-    stateValEl.style.color = '#cc6666';
-});
-
-resetBtn.addEventListener('click', () => {
-    updateMachineType();
-    // Apply joystick port setting on reset
-    const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
-    fm7.setJoystickPort(joyPort);
-    const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
-    fm7.reset(bootMode);
-    if (!fm7._running) {
-        fm7.start(canvas);
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-        setControlsLocked(true);
-    }
-    stateValEl.textContent = 'Running';
-    stateValEl.style.color = '#00cc66';
+    setEmuState('running');
 });
 
 // =========================================================================

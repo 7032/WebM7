@@ -61,9 +61,21 @@ export class CMT {
             return false;
         }
 
-        const dataSize = buffer.byteLength - T77_HEADER_SIZE;
+        // Skip header string + all trailing null bytes (some tools write 18 bytes)
+        let dataOffset = T77_HEADER_SIZE;
+        const allBytes = new Uint8Array(buffer);
+        while (dataOffset < buffer.byteLength && allBytes[dataOffset] === 0x00) {
+            dataOffset++;
+        }
+        // Data must start on 2-byte boundary
+        if ((dataOffset & 1) !== 0 && dataOffset > T77_HEADER_SIZE) {
+            dataOffset--;  // Back up to even boundary
+        }
+        console.log(`[CMT] Header: ${dataOffset} bytes (${dataOffset - T77_HEADER_SIZE} extra null bytes skipped)`);
+
+        const dataSize = buffer.byteLength - dataOffset;
         const numPulses = (dataSize / 2) | 0;
-        const view = new DataView(buffer, T77_HEADER_SIZE);
+        const view = new DataView(buffer, dataOffset);
 
         // Auto-detect byte order: try both BE and LE, pick the one
         // that gives more values in the expected range (20-100)
@@ -113,7 +125,7 @@ export class CMT {
 
     /**
      * Detect scale factor from the two dominant pulse width clusters.
-     * Target: 2400Hz half-period ≈ 256 CPU cycles (at 1.2288MHz).
+     * Target: 2400Hz half-period ≈ 256 CPU cycles.
      */
     _detectScale(validCount) {
         if (validCount < 100) return 10;
@@ -263,6 +275,17 @@ export class CMT {
             this._level = 0;
         }
         return stats;
+    }
+
+    /** Eject the tape — clears loaded data */
+    eject() {
+        this._pulses = null;
+        this._loaded = false;
+        this._eot = false;
+        this._pos = 0;
+        this._cycleCount = 0;
+        this._level = 0;
+        this._motor = false;
     }
 
     reset() {

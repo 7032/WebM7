@@ -8,10 +8,16 @@
 // 3 FM channels, 4 operators each, phase modulation synthesis.
 // SSG channels are handled separately by psg.js.
 //
-// Master clock = 1,228,800 Hz (same as CPU/PSG clock on FM-7).
+// FM synthesis internal clock = 1,228,800 Hz.
+// YM2203 external clock = 4.9152 MHz / 2 = 2,457,600 Hz on FM77AV.
+// On FM-7, CPU and OPN share the same clock domain so ratio = 1.0.
+// On FM77AV, OPN (2.4576 MHz) runs faster than CPU (2 MHz) → ratio = 1.2288.
 // =============================================================================
 
 const MASTER_CLOCK  = 1228800;
+const OPN_EXT_CLOCK_AV = 2457600;   // YM2203 external clock on FM77AV (4.9152 MHz / 2)
+const CPU_CLOCK_AV     = 2000000;   // FM77AV CPU clock (2 MHz)
+const OPN_CPU_RATIO_AV = OPN_EXT_CLOCK_AV / CPU_CLOCK_AV;  // 1.2288
 const SAMPLE_RATE   = 48000;
 const BUF_SIZE      = 16384;
 const BUF_MASK      = BUF_SIZE - 1;
@@ -461,7 +467,10 @@ class FMOperator {
         this.needsRecalc = true;
     }
 
-    // Key on
+    // Key on — only triggers on 0→1 transition.
+    // Repeated writes of the same key state to register $28 are ignored.
+    // Envelope restarts only from OFF or RELEASE phase; a key-on during
+    // ATTACK/DECAY/SUSTAIN preserves the current envelope position.
     keyOn() {
         if (!this.keyPressed) {
             this.keyPressed = true;
@@ -479,7 +488,7 @@ class FMOperator {
         }
     }
 
-    // Key off
+    // Key off — only triggers on 1→0 transition
     keyOff() {
         if (this.keyPressed) {
             this.keyPressed = false;
@@ -1024,15 +1033,25 @@ export class OPN {
             new Int32Array(512),
         ];
 
-        // Timers
+        // Timers — separate "loaded" vs "active" periods to match real hardware.
+        // On the YM2203, writing to timer registers changes the reload value
+        // but the current countdown continues until overflow. Only on overflow
+        // does the new period take effect.
         this._timerA = 0;
         this._timerB = 0;
         this._timerACount = 0;
         this._timerBCount = 0;
+        this._timerAPeriod = 0;       // Active period (used for current count cycle)
+        this._timerBPeriod = 0;
         this._timerAEn = false;
         this._timerBEn = false;
         this._timerAIRQ = false;
         this._timerBIRQ = false;
+
+        // Timer clock ratio: OPN_clock / CPU_clock.
+        // FM-7: 1.0 (OPN and CPU share same clock domain in emulation).
+        // FM77AV: 1.2288 (OPN at 2.4576 MHz, CPU at 2 MHz).
+        this._timerClockRatio = 1.0;
 
         // Audio output
         this._audioCtx = null;
@@ -1043,8 +1062,9 @@ export class OPN {
         this._wPos = 0;
         this._rPos = 0;
 
-        // CPU cycles accumulator
-        this._cyclesPerSample = MASTER_CLOCK / SAMPLE_RATE;
+        // CPU cycles accumulator — step() receives CPU cycles (2 MHz),
+        // not OPN clock cycles, so use CPU clock for sample timing.
+        this._cyclesPerSample = 2000000 / SAMPLE_RATE;  // ≈ 41.67
         this._fmAccum = 0;
 
         // Address latch (for external register write protocol)
@@ -1067,6 +1087,15 @@ export class OPN {
         this._configureRate(c, r, false);
         this.reset();
         this._setFMVolume(0);
+    }
+
+    /**
+     * Set FM77AV mode for OPN timer clock conversion.
+     * On FM77AV the YM2203 external clock (2.4576 MHz) differs from
+     * the CPU clock (2 MHz), requiring timer count scaling.
+     */
+    setAVMode(isAV) {
+        this._timerClockRatio = isAV ? OPN_CPU_RATIO_AV : 1.0;
     }
 
     _configureRate(c, r, ip) {
@@ -1135,6 +1164,8 @@ export class OPN {
         this._timerB = 0;
         this._timerACount = 0;
         this._timerBCount = 0;
+        this._timerAPeriod = 0;
+        this._timerBPeriod = 0;
         this._timerAEn = false;
         this._timerBEn = false;
         this._timerAIRQ = false;
@@ -1173,9 +1204,10 @@ export class OPN {
         value &= 0xFF;
         this._regs[reg] = value;
 
-        // Timer registers
+        // Timer registers — update reload value (takes effect on next overflow)
         if (reg === 0x24) {
             this._timerA = (this._timerA & 0x03) | (value << 2);
+            // Reload period updated but NOT applied to current countdown
             return;
         }
         if (reg === 0x25) {
@@ -1197,8 +1229,15 @@ export class OPN {
             if (value & 0x10) this._status &= ~0x01;
             if (value & 0x20) this._status &= ~0x02;
 
-            if (this._timerAEn && !prevAEn) this._timerACount = 0;
-            if (this._timerBEn && !prevBEn) this._timerBCount = 0;
+            // On fresh enable: load period and reset count
+            if (this._timerAEn && !prevAEn) {
+                this._timerAPeriod = 72 * (1024 - this._timerA);
+                this._timerACount = 0;
+            }
+            if (this._timerBEn && !prevBEn) {
+                this._timerBPeriod = 1152 * (256 - this._timerB);
+                this._timerBCount = 0;
+            }
 
             // Ch3 mode + CSM stored in regtc
             this._regtc = (value & 0xc0);
@@ -1396,24 +1435,35 @@ export class OPN {
     // =========================================================================
 
     _advanceTimers(cpuCycles) {
+        // YM2203 Timer A/B periods in OPN external clock cycles.
+        // Timer A: 72 × (1024-N) OPN clocks  (YM2203 internal /72 prescaler)
+        // Timer B: 1152 × (256-N) OPN clocks  (YM2203 internal /1152 prescaler)
+        // OPN external clock (2.4576 MHz) is faster than CPU (2 MHz),
+        // so convert CPU cycles → OPN cycles before accumulating.
+        // Cached active periods: new register values take effect on overflow.
+        const opnCycles = cpuCycles * this._timerClockRatio;
+
         if (this._timerAEn) {
-            const periodA = 72 * (1024 - this._timerA);
+            const periodA = this._timerAPeriod;
             if (periodA > 0) {
-                this._timerACount += cpuCycles;
+                this._timerACount += opnCycles;
                 while (this._timerACount >= periodA) {
                     this._timerACount -= periodA;
                     if (this._timerAIRQ) this._status |= 0x01;
+                    // Reload: apply any pending timer value change
+                    this._timerAPeriod = 72 * (1024 - this._timerA);
                 }
             }
         }
 
         if (this._timerBEn) {
-            const periodB = 1152 * (256 - this._timerB);
+            const periodB = this._timerBPeriod;
             if (periodB > 0) {
-                this._timerBCount += cpuCycles;
+                this._timerBCount += opnCycles;
                 while (this._timerBCount >= periodB) {
                     this._timerBCount -= periodB;
                     if (this._timerBIRQ) this._status |= 0x02;
+                    this._timerBPeriod = 1152 * (256 - this._timerB);
                 }
             }
         }

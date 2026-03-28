@@ -12,8 +12,10 @@
  *   VSync      - fires every 16667 us (60 Hz NTSC)
  */
 
-const CPU_CLOCK_HZ = 1228800;  // 1.2288 MHz
-const CYCLES_PER_MICROSECOND = CPU_CLOCK_HZ / 1000000;  // ~1.2288
+// FM-7: 1.2288 MHz (4.9152 MHz / 4), FM77AV: 2 MHz
+// Using 2 MHz for FM77AV compatibility; FM-7 mode timing is approximate
+const CPU_CLOCK_HZ = 2000000;  // 2 MHz (FM77AV)
+const CYCLES_PER_MICROSECOND = CPU_CLOCK_HZ / 1000000;  // 2.0
 
 /**
  * Convert microseconds to CPU cycles.
@@ -122,10 +124,12 @@ export class Scheduler {
      */
     setSubHalted(halted) {
         this.subHalted = halted;
-        if (halted) {
-            // When halting, sync counters so resume starts clean
-            this.subCyclesTotal = this.mainCyclesTotal;
-        }
+        // Always sync cycle counters on HALT and RUN transitions.
+        // Without this, un-halting creates a phantom cycle deficit:
+        // the sub CPU tries to "catch up" cycles that passed while halted,
+        // causing a burst of thousands of sub CPU instructions that
+        // destroys timing (drawing appears ~0.2fps, BGM races ahead).
+        this.subCyclesTotal = this.mainCyclesTotal;
     }
 
     // ------------------------------------------------------------------

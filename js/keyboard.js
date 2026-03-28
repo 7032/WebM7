@@ -90,7 +90,7 @@ const CODE_TO_FM7_ASCII = new Map([
     ['NumpadDivide', 0x2F], ['NumpadDecimal', 0x2E], ['NumpadEnter', 0x0D],
     // Control keys
     ['Enter', 0x0D], ['Space', 0x20], ['Escape', 0x1B], ['Backspace', 0x08],
-    ['Tab', 0x09], ['Delete', 0x7F], ['Home', 0x0B],
+    ['Tab', 0x09], ['Delete', 0x7F], ['Insert', 0x12], ['Home', 0x0B],
     // Arrow keys
     ['ArrowLeft', 0x1D], ['ArrowRight', 0x1C], ['ArrowUp', 0x1E], ['ArrowDown', 0x1F],
     // Function keys

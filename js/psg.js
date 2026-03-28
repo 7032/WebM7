@@ -183,7 +183,8 @@ export class PSG {
     step(cpuCycles) {
         if (!this._audioCtx) return;
 
-        this._accum += cpuCycles / CLOCK_DIV;
+        // Convert CPU cycles (2 MHz) to PSG internal ticks (1.2288 MHz / 8)
+        this._accum += cpuCycles * (1228800 / 2000000) / CLOCK_DIV;
         const tps = this._ticksPerSample;
 
         while (this._accum >= tps) {
