@@ -70,6 +70,7 @@
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+                <label id="fmCardLabel" style="margin:0;"><input type="checkbox" id="fmCardCheck"> FM Sound Card</label>
                 <label style="margin:0;">Joystick:</label>
                 <div class="radio-group">
                     <label><input type="radio" name="joyPort" value="0" checked> Port 1</label>
@@ -94,24 +95,24 @@
             <label>Individual:</label>
             <div class="rom-list">
                 <div class="rom-item">
-                    <span class="rom-name">fbasic30.rom</span>
+                    <span class="rom-name">FBASIC30.ROM</span>
                     <input type="file" id="romFBasic" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusFBasic">--</span>
                 </div>
                 <div class="rom-item">
-                    <span class="rom-name">boot_dos.rom</span>
+                    <span class="rom-name">BOOT_BAS.ROM</span>
+                    <input type="file" id="romBootBas" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusBootBas">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">BOOT_DOS.ROM</span>
                     <input type="file" id="romBootDos" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusBootDos">--</span>
                 </div>
                 <div class="rom-item">
-                    <span class="rom-name">subsys_c.rom</span>
+                    <span class="rom-name">SUBSYS_C.ROM</span>
                     <input type="file" id="romSubSys" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusSubSys">--</span>
-                </div>
-                <div class="rom-item">
-                    <span class="rom-name">SUBSYSCG.ROM</span>
-                    <input type="file" id="romCG" accept=".rom,.ROM,.bin">
-                    <span class="status-tag" id="statusCG">--</span>
                 </div>
             </div>
             <!-- FM77AV additional ROMs (hidden by default) -->
@@ -133,7 +134,12 @@
                     <span class="status-tag" id="statusSubSysB">--</span>
                 </div>
                 <div class="rom-item">
-                    <span class="rom-name">fbasic30.rom</span>
+                    <span class="rom-name">SUBSYSCG.ROM</span>
+                    <input type="file" id="romCG" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusCG">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">FBASIC30.ROM</span>
                     <input type="file" id="romFBasicAV" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusFBasicAV">--</span>
                 </div>
@@ -307,16 +313,17 @@
         <h4>FM-7 共通ROM</h4>
         <table>
         <tr><th>ファイル名</th><th>内容</th></tr>
-        <tr><td><code>fbasic30.rom</code></td><td>F-BASIC V3.0 ROM</td></tr>
-        <tr><td><code>boot_dos.rom</code></td><td>DOS ブート ROM</td></tr>
-        <tr><td><code>subsys_c.rom</code></td><td>サブシステム ROM</td></tr>
-        <tr><td><code>SUBSYSCG.ROM</code></td><td>キャラクタージェネレータ ROM</td></tr>
+        <tr><td><code>FBASIC30.ROM</code></td><td>F-BASIC V3.0 ROM</td></tr>
+        <tr><td><code>BOOT_BAS.ROM</code></td><td>BASIC ブート ROM</td></tr>
+        <tr><td><code>BOOT_DOS.ROM</code></td><td>DOS ブート ROM</td></tr>
+        <tr><td><code>SUBSYS_C.ROM</code></td><td>サブシステム ROM（CGフォント内蔵）</td></tr>
         </table>
 
         <h4>FM77AV 追加ROM</h4>
         <p>FM77AVモードで起動する場合は、上記に加えて以下のROMも必要です。</p>
         <table>
         <tr><th>ファイル名</th><th>内容</th></tr>
+        <tr><td><code>SUBSYSCG.ROM</code></td><td>キャラクタージェネレータ ROM（FM77AV統合版）</td></tr>
         <tr><td><code>INITIATE.ROM</code></td><td>イニシエータ ROM</td></tr>
         <tr><td><code>SUBSYS_A.ROM</code></td><td>サブシステム Type-A ROM</td></tr>
         <tr><td><code>SUBSYS_B.ROM</code></td><td>サブシステム Type-B ROM</td></tr>
@@ -495,6 +502,7 @@ const screenContainer = document.getElementById('screenContainer');
 // UI elements
 const romFolderInput  = document.getElementById('romFolder');
 const romFBasicInput  = document.getElementById('romFBasic');
+const romBootBasInput = document.getElementById('romBootBas');
 const romBootDosInput = document.getElementById('romBootDos');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
@@ -507,6 +515,7 @@ const tapeEjectBtn    = document.getElementById('tapeEjectBtn');
 
 const romStatusEl     = document.getElementById('romStatus');
 const statusFBasicEl  = document.getElementById('statusFBasic');
+const statusBootBasEl = document.getElementById('statusBootBas');
 const statusBootDosEl = document.getElementById('statusBootDos');
 const statusSubSysEl  = document.getElementById('statusSubSys');
 const statusCGEl      = document.getElementById('statusCG');
@@ -565,6 +574,8 @@ function updateMachineType() {
     const isAV = machineType === MACHINE_FM77AV;
     romListAV.style.display = isAV ? '' : 'none';
     debugAV.style.display = isAV ? '' : 'none';
+    // FM sound card option: FM-7 only (FM77AV has OPN built-in)
+    document.getElementById('fmCardLabel').style.display = isAV ? 'none' : '';
 
     // Update title
     if (isAV) {
@@ -578,32 +589,45 @@ document.querySelectorAll('input[name="machineType"]').forEach(radio => {
     radio.addEventListener('change', updateMachineType);
 });
 
-// Lock all control radio groups during VM run
+// Lock control groups during VM run (machineType, bootMode, fmCard locked; joyPort stays live)
 const _lockedRadioState = {};
 function setControlsLocked(locked) {
-    ['machineType', 'bootMode', 'joyPort'].forEach(name => {
+    ['machineType', 'bootMode'].forEach(name => {
         const group = document.querySelector(`input[name="${name}"]`).closest('.radio-group');
         group.classList.toggle('locked', locked);
         if (locked) {
-            // Save current selection
             const checked = document.querySelector(`input[name="${name}"]:checked`);
             _lockedRadioState[name] = checked ? checked.value : null;
         }
     });
+    // FM card checkbox: locked during run
+    const fmCheck = document.getElementById('fmCardCheck');
+    if (locked) {
+        fmCheck.disabled = true;
+    } else {
+        fmCheck.disabled = false;
+    }
 }
 // Block radio changes during run by reverting to saved state
-['machineType', 'bootMode', 'joyPort'].forEach(name => {
+['machineType', 'bootMode'].forEach(name => {
     document.querySelectorAll(`input[name="${name}"]`).forEach(radio => {
         radio.addEventListener('click', (e) => {
             if (!fm7._running) return;
             e.preventDefault();
-            // Revert to saved state
             const saved = _lockedRadioState[name];
             if (saved) {
                 const r = document.querySelector(`input[name="${name}"][value="${saved}"]`);
                 if (r) r.checked = true;
             }
         });
+    });
+});
+// Joystick port: live-switchable during run
+document.querySelectorAll('input[name="joyPort"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+        if (fm7._running) {
+            fm7.setJoystickPort(parseInt(radio.value));
+        }
     });
 });
 document.querySelectorAll('input[name="joyPort"]').forEach(radio => {
@@ -708,6 +732,7 @@ romFolderInput.addEventListener('change', async (e) => {
                 loaded++;
             } else if (name === 'boot_bas.rom') {
                 fm7.loadBootBasROM(data);
+                markLoaded(statusBootBasEl);
                 loaded++;
             } else if (name === 'subsys_c.rom') {
                 fm7.loadSubROM(data);
@@ -760,14 +785,15 @@ function setupIndividualROM(input, loaderFn, statusEl) {
 }
 
 setupIndividualROM(romFBasicInput,  (d) => fm7.loadFBasicROM(d),  statusFBasicEl);
+setupIndividualROM(romBootBasInput, (d) => fm7.loadBootBasROM(d), statusBootBasEl);
 setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosEl);
 setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl);
-setupIndividualROM(romCGInput,      (d) => fm7.loadCGROM(d),      statusCGEl);
 
 // FM77AV ROMs
 setupIndividualROM(romInitiateInput, (d) => fm7.loadInitiateROM(d), statusInitiateEl);
 setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysAEl);
 setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl);
+setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl);
 setupIndividualROM(romFBasicAVInput, (d) => fm7.loadFBasicROM(d),  statusFBasicAVEl);
 
 function markLoaded(el) {
@@ -810,6 +836,7 @@ tapeFileEl.addEventListener('change', async (e) => {
         if (ok) {
             tapeStatusEl.textContent = file.name;
             tapeStatusEl.classList.add('loaded');
+            cmtInfo.textContent = 'pos=0 (loaded)';
         } else {
             tapeStatusEl.textContent = 'Fail';
         }
@@ -872,6 +899,7 @@ playStopBtn.addEventListener('click', () => {
     if (emuState === 'stopped') {
         // Start: reset + run
         updateMachineType();
+        fm7.setFMCard(document.getElementById('fmCardCheck').checked);
         const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
         fm7.setJoystickPort(joyPort);
         const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
@@ -908,14 +936,16 @@ diskEjectBtn.addEventListener('click', () => {
 tapeEjectBtn.addEventListener('click', () => {
     fm7.cmt.eject();
     tapeFileEl.value = '';
-    tapeStatus.textContent = '--';
-    tapeStatus.style.color = '';
+    tapeStatusEl.textContent = '--';
+    tapeStatusEl.classList.remove('loaded');
+    cmtInfo.textContent = '';
 });
 
 // Reset: stop → reset → immediately restart
 resetBtn.addEventListener('click', () => {
     fm7.stop();
     updateMachineType();
+    fm7.setFMCard(document.getElementById('fmCardCheck').checked);
     const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
     fm7.setJoystickPort(joyPort);
     const bootMode = document.querySelector('input[name="bootMode"]:checked').value;

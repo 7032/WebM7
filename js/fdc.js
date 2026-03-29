@@ -199,6 +199,7 @@ class D77Disk {
         }
 
         this.loaded = true;
+
         return true;
     }
 
@@ -506,9 +507,6 @@ export class FDC {
                 break;
 
             case 0xFD19: // Track Register
-                if (this.trackReg !== value) {
-                    console.log(`FDC: trackReg written: ${this.trackReg} -> ${value} (head=${this.headPosition[this.currentDrive]})`);
-                }
                 this.trackReg = value;
                 break;
 
@@ -650,14 +648,6 @@ export class FDC {
 
         // Set access latch for UI LED
         this.accessLatch = true;
-
-        // Log command execution
-        this._seekLogCount = 0;
-        const cmdNames = {0x00:'Restore',0x10:'Seek',0x20:'Step',0x30:'Step',
-            0x40:'StepIn',0x50:'StepIn',0x60:'StepOut',0x70:'StepOut',
-            0x80:'ReadSec',0x90:'ReadSecM',0xA0:'WriteSec',0xB0:'WriteSecM',
-            0xC0:'ReadAddr',0xE0:'ReadTrk',0xF0:'WriteTrk'};
-        console.log(`FDC: cmd $${cmd.toString(16)} (${cmdNames[cmdHigh]||'??'}) track=${this.trackReg} sector=${this.sectorReg} data=${this.dataReg} drive=${this.currentDrive} side=${this.currentSide}`);
 
         // Set BUSY
         this.statusReg = STATUS.BUSY;
@@ -828,12 +818,6 @@ export class FDC {
     /** Process one step pulse during seek */
     _stepSeek() {
         const cmd = this.commandReg & 0xF0;
-        if (!this._seekLogCount) this._seekLogCount = 0;
-        if (this._seekLogCount < 5) {
-            this._seekLogCount++;
-            console.log(`FDC: _stepSeek cmd=$${cmd.toString(16)} trackReg=${this.trackReg} head=${this.headPosition[this.currentDrive]} data=${this.dataReg} dir=${this.stepDirection}`);
-        }
-
         if (cmd === 0x00) {
             // Restore
             let pos = this.headPosition[this.currentDrive];
@@ -906,9 +890,8 @@ export class FDC {
             status |= STATUS.HEAD_ENGAGED;
         }
 
-        // Drive is always READY for Type I commands.
-        // On real FM-7, drives are physically present so NOT_READY never set.
-        // "No disk" is detected by RNF on Type II/III, not by NOT_READY.
+        // Drive is always READY for Type I commands — drives are physically
+        // present.  "No disk" is detected by RNF on Type II/III, not NOT_READY.
 
         this._completeCommand(status);
     }
@@ -940,6 +923,7 @@ export class FDC {
         this.dataBuffer = sector.data;
         this.dataIndex = 0;
         this.dataLength = sector.size;
+
 
         // Check deleted data mark
         let statusExtra = 0;
@@ -1172,7 +1156,6 @@ export class FDC {
 
         // Assert IRQ
         this.irqFlag = true;
-        console.log(`FDC: complete, status=$${this.statusReg.toString(16)} track=${this.trackReg} head=${this.headPosition[this.currentDrive]}`);
         if (this.onIRQ) {
             this.onIRQ();
         }

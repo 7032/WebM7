@@ -12,7 +12,7 @@ import { Scheduler } from './scheduler.js';
 import { Keyboard } from './keyboard.js';
 import { PSG } from './psg.js';
 import { OPN } from './opn.js';
-import { usToCycles, cyclesToUs } from './scheduler.js';
+import { usToCycles, cyclesToUs, setCPUClock } from './scheduler.js';
 import { CMT } from './cmt.js';
 
 // =============================================================================
@@ -176,7 +176,8 @@ export class FM7 {
         this._mmrRegs      = new Uint8Array(128); // 8 banks × 16 segments
         this._extRAM       = new Uint8Array(MMR_EXTENDED_RAM); // 192KB extended RAM
 
-        // --- OPN (YM2203) stub with BDIR/BC1 protocol ---
+        // --- OPN (YM2203) / FM Sound Card ---
+        this._fmCardEnabled = false; // FM sound card: off by default for FM-7
         this._opnAddrLatch = 0;
         this._opnDataBus   = 0;
         this._opnRegs      = new Uint8Array(256);
@@ -445,7 +446,7 @@ export class FM7 {
 
         // $FD04: Sub CPU status (BUSY, attention, break key)
         if (addr === FD04_IRQ_MASK) {
-            let ret = this._subBusy ? 0xFF : 0x7F;  // bit 7 = BUSY only (not HALT)
+            let ret = this._subBusy ? 0xFF : 0x7F;  // bit 7 = BUSY only
             if (this._subAttn) {
                 ret &= ~0x01;  // bit 0 = attention (active low)
                 this._subAttn = false;  // Clear attention on read
@@ -460,9 +461,9 @@ export class FM7 {
         }
 
         // Sub CPU status ($FD05 read)
-        // bit 7 = BUSY only (not HALT). bit 0 = EXTDET.
+        // bit 7 = BUSY. bit 0 = EXTDET.
         if (addr === FD05_SUB_CTRL) {
-            let ret = this._subBusy ? 0xFE : 0x7E;  // bit7=BUSY, bit0=0 (EXTDET present)
+            let ret = this._subBusy ? 0xFE : 0x7E;
             return ret;
         }
 
@@ -548,17 +549,22 @@ export class FM7 {
 
         // $FD15: OPN status register / BDIR-BC1 read
         if (addr === 0xFD15) {
+            if (!this._fmCardEnabled) return 0xFF;
             return this.opn.readStatus();
         }
 
         // $FD16: OPN data bus read
         if (addr === 0xFD16) {
+            if (!this._fmCardEnabled) return 0xFF;
             return this._opnDataBus;
         }
 
         // $FD06/$FD07: RS-232C USART (stub: no device connected)
         if (addr === 0xFD06) return 0x00;  // Data register (empty)
         if (addr === 0xFD07) return 0x84;  // Status: TX ready, RX empty
+
+        // $FD20-$FD2F: Kanji ROM ($FD20-$FD23, $FD2C-$FD2F) + reserved ($FD24-$FD2B)
+        if (addr >= 0xFD20 && addr <= 0xFD2F) return 0xFF;
 
         // $FD08-$FD0C: Printer/timer I/O (stub)
         if (addr >= 0xFD08 && addr <= 0xFD0C) return 0xFF;
@@ -658,13 +664,10 @@ export class FM7 {
             const cancelReq = (val & 0x40) !== 0;
 
             if (haltReq) {
-                // HALT request — immediate halt + set BUSY.
-                // On real hardware, the $FD05 write triggers IRQ and the sub CPU's
-                // IRQ handler sets BUSY via $D40A before halting. We simulate the
-                // end result: HALT + BUSY both set atomically.
+                // HALT request — set BUSY so $FD05 bit7=1 immediately.
                 if (!this._subHalted) {
                     this._subHalted = true;
-                    this._subBusy = true;   // Sub CPU would set this via IRQ handler
+                    this._subBusy = true;
                     this.scheduler.setSubHalted(true);
                 }
             } else {
@@ -811,8 +814,12 @@ export class FM7 {
         }
 
         // $FD37: Multi-page register (main CPU side access)
+        // Controls which color planes are visible (bit=1 → plane disabled)
         if (addr === 0xFD37) {
-            this.display.multiPage = val;
+            if (this.display.multiPage !== val) {
+                this.display.multiPage = val;
+                this.display._fullDirty = true;
+            }
             return;
         }
 
@@ -841,6 +848,7 @@ export class FM7 {
         }
 
         // $FD15: OPN command register (FM7 Programmers Guide §7.3)
+        if (addr === 0xFD15 && !this._fmCardEnabled) return;
         //   bit1:0 (BDIR/BC1): $00=Inactive, $01=Read reg, $02=Write reg, $03=Address Latch
         //   bit2: Status read — loads OPN status register onto $FD16 data bus
         if (addr === 0xFD15) {
@@ -882,6 +890,7 @@ export class FM7 {
 
         // $FD16: OPN data bus write
         if (addr === 0xFD16) {
+            if (!this._fmCardEnabled) return;
             this._opnDataBus = val & 0xFF;
             return;
         }
@@ -894,6 +903,9 @@ export class FM7 {
 
         // $FD06/$FD07: RS-232C USART write (stub: no device)
         if (addr === 0xFD06 || addr === 0xFD07) return;
+
+        // $FD20-$FD2F: Kanji ROM ($FD20-$FD23, $FD2C-$FD2F) + reserved ($FD24-$FD2B)
+        if (addr >= 0xFD20 && addr <= 0xFD2F) return;
 
         // $FDFD-$FDFF: Boot mode / extended registers (stub)
         if (addr >= 0xFDFD) return;
@@ -1250,8 +1262,6 @@ export class FM7 {
 
             while (this.scheduler.mainCyclesTotal - startMain < targetCycles) {
                 if (--loopGuard <= 0) {
-                    console.warn('[EXEC] loop guard hit — possible stuck CPU. MainPC=$' +
-                        this.mainCPU.pc.toString(16) + ' SubPC=$' + this.subCPU.pc.toString(16));
                     break;
                 }
 
@@ -1293,7 +1303,7 @@ export class FM7 {
 
                 // PSG audio synthesis (generates samples into ring buffer)
                 this.psg.step(mainElapsed);
-                this.opn.step(mainElapsed);
+                if (this._fmCardEnabled) this.opn.step(mainElapsed);
                 this.cmt.step(mainElapsed);
 
                 // Check and assert IRQ/FIRQ on main CPU (level-triggered)
@@ -1322,7 +1332,7 @@ export class FM7 {
             }
 
             const actualCycles = this.scheduler.mainCyclesTotal - startMain;
-            return actualCycles / (1228800 / 1000000);
+            return actualCycles / (1794000 / 1000000);
         };
 
         // Timer IRQ event (~2034.5us period, ~491.6 Hz)
@@ -1357,7 +1367,7 @@ export class FM7 {
         // FM-7 IRQ is level-triggered: asserted as long as source is active
         let mainIrq = false;
 
-        // Timer IRQ: bit 2=1 → enabled, bit 2=0 → masked
+        // Timer IRQ: $FD02 bit2 (1=enable)
         if (this._timerIRQ && (this._irqMaskReg & 0x04)) mainIrq = true;
 
         // Keyboard IRQ: use keyboard module's actual state (handles its own mask)
@@ -1370,7 +1380,7 @@ export class FM7 {
         // (FM7 Programmers Guide §3.1). Edge-triggered latch: set on new
         // OPN timer overflow, cleared by reading $FD03. This prevents the
         // level-triggered OPN status flag from causing continuous IRQ re-entry.
-        {
+        if (this._fmCardEnabled) {
             const opnActive = (this.opn.timerAFlag && this.opn._timerAIRQ) ||
                               (this.opn.timerBFlag && this.opn._timerBIRQ);
             if (opnActive && !this._opnIrqPrev) this._opnIrqLatch = true;
@@ -1465,10 +1475,10 @@ export class FM7 {
      */
     async loadROMs(romPath) {
         const romFiles = [
-            { name: 'fbasic30.rom',  loader: (d) => this.loadFBasicROM(d) },
-            { name: 'boot_dos.rom',  loader: (d) => this.loadBootROM(d) },
-            { name: 'subsys_c.rom',  loader: (d) => this.loadSubROM(d) },
-            { name: 'SUBSYSCG.ROM',  loader: (d) => this.loadCGROM(d) },
+            { name: 'FBASIC30.ROM',  loader: (d) => this.loadFBasicROM(d) },
+            { name: 'BOOT_BAS.ROM',  loader: (d) => this.loadBootBasROM(d) },
+            { name: 'BOOT_DOS.ROM',  loader: (d) => this.loadBootROM(d) },
+            { name: 'SUBSYS_C.ROM',  loader: (d) => this.loadSubROM(d) },
         ];
 
         const results = await Promise.allSettled(
@@ -1605,8 +1615,13 @@ export class FM7 {
             type = MACHINE_FM7;
         }
         this._machineType = type;
-        this.opn.setAVMode(type === MACHINE_FM77AV);
-        console.log(`Machine type set to: ${type}`);
+        const isAV = type === MACHINE_FM77AV;
+        const cpuHz = isAV ? 2000000 : 1794000;
+        setCPUClock(cpuHz);
+        this.opn.setAVMode(isAV);
+        this.opn.setCPUClock(cpuHz);
+        this.psg.setCPUClock(cpuHz);
+        console.log(`Machine type set to: ${type} (CPU ${cpuHz/1000}kHz)`);
     }
 
     /**
@@ -1614,6 +1629,14 @@ export class FM7 {
      */
     get isFM77AV() {
         return this._machineType === MACHINE_FM77AV;
+    }
+
+    /**
+     * Enable/disable FM sound card (OPN + joystick port).
+     * FM77AV always has OPN built-in; this only affects FM-7 mode.
+     */
+    setFMCard(enabled) {
+        this._fmCardEnabled = enabled || this.isFM77AV;
     }
 
     // =========================================================================

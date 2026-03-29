@@ -3,19 +3,27 @@
  *
  * Cycle-accurate dual-CPU event scheduler for FM-7.
  *
- * FM-7 main CPU: 6809 @ 1.2288 MHz
- * FM-7 sub CPU:  6809 @ 1.2288 MHz (1:1 ratio)
- * 1 cycle ~= 0.8138 microseconds
+ * FM-7 main CPU: 6809 @ 1.794 MHz
+ * FM77AV main CPU: 6809 @ 2.0 MHz
+ * Sub CPU runs at same speed as main (1:1 ratio)
  *
  * Key periodic events:
  *   Timer IRQ  - fires every ~2034.5 us (alternating 2034/2035)
  *   VSync      - fires every 16667 us (60 Hz NTSC)
  */
 
-// FM-7: 1.2288 MHz (4.9152 MHz / 4), FM77AV: 2 MHz
-// Using 2 MHz for FM77AV compatibility; FM-7 mode timing is approximate
-const CPU_CLOCK_HZ = 2000000;  // 2 MHz (FM77AV)
-const CYCLES_PER_MICROSECOND = CPU_CLOCK_HZ / 1000000;  // 2.0
+// FM-7: 1.794 MHz, FM77AV: 2 MHz
+let CPU_CLOCK_HZ = 1794000;  // FM-7: 1.794MHz
+let CYCLES_PER_MICROSECOND = CPU_CLOCK_HZ / 1000000;
+
+/**
+ * Set CPU clock speed. Called when machine type changes.
+ * @param {number} hz - Clock frequency in Hz (1794000 for FM-7, 2000000 for FM77AV)
+ */
+function setCPUClock(hz) {
+    CPU_CLOCK_HZ = hz;
+    CYCLES_PER_MICROSECOND = hz / 1000000;
+}
 
 /**
  * Convert microseconds to CPU cycles.
@@ -303,4 +311,4 @@ export class Scheduler {
 }
 
 // Export constants for external use
-export { CPU_CLOCK_HZ, CYCLES_PER_MICROSECOND, usToCycles, cyclesToUs };
+export { CPU_CLOCK_HZ, CYCLES_PER_MICROSECOND, usToCycles, cyclesToUs, setCPUClock };

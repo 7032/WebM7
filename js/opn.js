@@ -1062,9 +1062,9 @@ export class OPN {
         this._wPos = 0;
         this._rPos = 0;
 
-        // CPU cycles accumulator — step() receives CPU cycles (2 MHz),
+        // CPU cycles accumulator — step() receives CPU cycles,
         // not OPN clock cycles, so use CPU clock for sample timing.
-        this._cyclesPerSample = 2000000 / SAMPLE_RATE;  // ≈ 41.67
+        this._cyclesPerSample = 1794000 / SAMPLE_RATE;  // default FM-7
         this._fmAccum = 0;
 
         // Address latch (for external register write protocol)
@@ -1096,6 +1096,10 @@ export class OPN {
      */
     setAVMode(isAV) {
         this._timerClockRatio = isAV ? OPN_CPU_RATIO_AV : 1.0;
+    }
+
+    setCPUClock(hz) {
+        this._cyclesPerSample = hz / SAMPLE_RATE;
     }
 
     _configureRate(c, r, ip) {

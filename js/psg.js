@@ -69,11 +69,16 @@ export class PSG {
         this._accum             = 0;
         this._ticksPerSample    = (PSG_CLOCK / CLOCK_DIV) / SAMPLE_RATE;
         this._envTicksPerSample = (PSG_CLOCK / ENV_DIV)   / SAMPLE_RATE;
+        this._cpuToPsgRatio     = PSG_CLOCK / 1794000;  // default FM-7
     }
 
     // =====================================================================
     // Reset
     // =====================================================================
+
+    setCPUClock(hz) {
+        this._cpuToPsgRatio = PSG_CLOCK / hz;
+    }
 
     reset() {
         this.regs.fill(0);
@@ -183,8 +188,8 @@ export class PSG {
     step(cpuCycles) {
         if (!this._audioCtx) return;
 
-        // Convert CPU cycles (2 MHz) to PSG internal ticks (1.2288 MHz / 8)
-        this._accum += cpuCycles * (1228800 / 2000000) / CLOCK_DIV;
+        // Convert CPU cycles to PSG internal ticks (1.2288 MHz / 8)
+        this._accum += cpuCycles * this._cpuToPsgRatio / CLOCK_DIV;
         const tps = this._ticksPerSample;
 
         while (this._accum >= tps) {

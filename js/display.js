@@ -1170,9 +1170,10 @@ export class Display {
 
                 for (let byteX = 0; byteX < BYTES_PER_LINE; byteX++) {
                     const byteAddr = (lineBase + byteX) % PLANE_SIZE;
-                    const bByte = blue [BLUE_BASE  + byteAddr];
-                    const rByte = red  [RED_BASE   + byteAddr];
-                    const gByte = green[GREEN_BASE + byteAddr];
+                    // multiPage bits 4-6: display mask (1=plane hidden)
+                    const bByte = (this.multiPage & 0x10) ? 0 : blue [BLUE_BASE  + byteAddr];
+                    const rByte = (this.multiPage & 0x20) ? 0 : red  [RED_BASE   + byteAddr];
+                    const gByte = (this.multiPage & 0x40) ? 0 : green[GREEN_BASE + byteAddr];
                     const px = pixelRow + (byteX << 3);
 
                     pixels[px    ] = pal[((gByte >> 7) & 1) << 2 | ((rByte >> 7) & 1) << 1 | ((bByte >> 7) & 1)];
