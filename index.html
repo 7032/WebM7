@@ -42,7 +42,7 @@
                     </div>
                 </div>
                 <span class="vol-label" id="tbKeyLabel">--</span>
-                <button id="debugPanelBtn" class="active" title="Debug Panel">DEBUG</button>
+                <button id="debugPanelBtn" title="Debug Panel">DEBUG</button>
                 <button id="inputPanelBtn" title="Input Monitor">INPUT</button>
                 <button id="fullscreenBtn" title="Fullscreen (F11)">FULL</button>
             </div>
@@ -78,7 +78,7 @@
                 </div>
             </div>
             <div class="btn-row">
-                <button id="playStopBtn" class="btn-start">Start</button>
+                <button id="playStopBtn" class="btn-start">Power On</button>
                 <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
             </div>
@@ -190,7 +190,7 @@
 </div>
 
 <!-- Debug Panel (floating) -->
-<div class="input-panel open" id="debugPanel" style="right:auto;left:16px;">
+<div class="input-panel" id="debugPanel" style="right:auto;left:16px;">
     <div class="ip-header draggable-header">
         <span>Debug</span>
         <button class="ip-close" id="debugPanelClose">&times;</button>
@@ -349,7 +349,7 @@
         <ol>
         <li><strong>Machine</strong> を選択（FM-7 / FM77AV）</li>
         <li><strong>Boot Mode</strong> を選択（DOS / BASIC）</li>
-        <li><strong>Start</strong> ボタンを押す（実行中は Stop に変わり停止可能。Pause で一時停止・Resume で再開）</li>
+        <li><strong>Power On</strong> ボタンを押す（実行中は Power Off に変わり停止可能。Pause で一時停止・Resume で再開）</li>
         </ol>
         <p>画面（Screen）をクリックするとキーボード入力がエミュレータに渡ります。</p>
 
@@ -373,7 +373,7 @@
         <h3>右側 — サイドパネル</h3>
         <table>
         <tr><th>セクション</th><th>内容</th></tr>
-        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、Joystick ポート（Port 1 / Port 2）の選択。Start/Stop（トグル）、Pause/Resume、Reset（即座に再起動）ボタン</td></tr>
+        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、Joystick ポート（Port 1 / Port 2）の選択。Power On/Off（トグル）、Pause/Resume、Reset（即座に再起動）ボタン</td></tr>
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功</td></tr>
         <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し</td></tr>
         <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示、パレット、PSG レジスタ</td></tr>
@@ -862,17 +862,17 @@ function setEmuState(state) {
     emuState = state;
     switch (state) {
         case 'stopped':
-            playStopBtn.textContent = 'Start';
+            playStopBtn.textContent = 'Power On';
             playStopBtn.className = 'btn-start';
             pauseBtn.disabled = true;
             pauseBtn.textContent = 'Pause';
             resetBtn.disabled = true;
             setControlsLocked(false);
-            stateValEl.textContent = 'Stopped';
+            stateValEl.textContent = 'Power Off';
             stateValEl.style.color = '#cc6666';
             break;
         case 'running':
-            playStopBtn.textContent = 'Stop';
+            playStopBtn.textContent = 'Power Off';
             playStopBtn.className = 'btn-stop';
             pauseBtn.disabled = false;
             pauseBtn.textContent = 'Pause';
@@ -882,7 +882,7 @@ function setEmuState(state) {
             stateValEl.style.color = '#00cc66';
             break;
         case 'paused':
-            playStopBtn.textContent = 'Stop';
+            playStopBtn.textContent = 'Power Off';
             playStopBtn.className = 'btn-stop';
             pauseBtn.disabled = false;
             pauseBtn.textContent = 'Resume';

@@ -474,14 +474,14 @@ export class FDC {
                 }
                 return this.dataReg;
 
-            case 0xFD1C: // Drive status (head/side readback + drive ready)
-                return this._readDriveStatus();
+            case 0xFD1C: // Side register readback (sidereg | 0xFE)
+                return this.currentSide | 0xFE;
 
-            case 0xFD1D: // Drive select readback (not standard, return 0)
+            case 0xFD1D: // Drive select readback
                 return 0;
 
-            case 0xFD1F: // DRQ/IRQ status
-                return (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00);
+            case 0xFD1F: // DRQ/IRQ status (lower 6 bits always 1)
+                return (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00) | 0x3F;
 
             default:
                 return 0xFF;

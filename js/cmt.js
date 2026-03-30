@@ -125,10 +125,15 @@ export class CMT {
 
     /**
      * Detect scale factor from the two dominant pulse width clusters.
-     * Target: 2400Hz half-period ≈ 256 CPU cycles.
+     * Target: 2400Hz half-period ≈ 416 CPU cycles (scale≈16).
+     *
+     * The BIOS selects tape timing routine based on $FD00 bit 0 (CPU speed):
+     *   bit0=1 (1.794MHz): routine #2, bit sample at ~621 cycles
+     *   bit0=0 (1.2288MHz): routine #1, bit sample at ~369 cycles
+     * At 1.794MHz with scale 16: short=416cy, long=768cy → 416 < 621 < 768 ✓
      */
     _detectScale(validCount) {
-        if (validCount < 100) return 10;
+        if (validCount < 100) return 16;
 
         // Collect widths, skip zeros (gaps), very large (silence) and very small (noise)
         const widths = [];
@@ -136,13 +141,13 @@ export class CMT {
             const w = this._pulses[i] & 0x7FFF;
             if (w >= 5 && w < 5000) widths.push(w);
         }
-        if (widths.length < 100) return 10;
+        if (widths.length < 100) return 16;
 
         widths.sort((a, b) => a - b);
         // Short cluster (2400Hz): 10th-30th percentile
         const shortCluster = (widths[Math.floor(widths.length * 0.10)] +
                               widths[Math.floor(widths.length * 0.30)]) / 2;
-        const scale = 256 / shortCluster;
+        const scale = 416 / shortCluster;
         const longCluster = (widths[Math.floor(widths.length * 0.60)] +
                              widths[Math.floor(widths.length * 0.80)]) / 2;
 

@@ -403,11 +403,12 @@ export class FM7 {
     // =========================================================================
 
     _mainIORead(addr) {
-        // Keyboard ($FD00 read also has bit 0 = baud rate for CMT)
+        // Keyboard ($FD00 read: bit 7 = BREAK key, bit 0 = CPU speed flag)
         if (addr === FD00_KEY_STATUS) {
             let val = this.keyboard.readIO(addr);
-            // bit 0: cassette baud rate (0=1200, 1=2400) - always 1200 for now
-            val &= ~0x01;
+            // bit 0: CPU speed flag (1=normal 1.794MHz, 0=low speed 1.2288MHz)
+            // BIOS uses this to select tape timing routine
+            val |= 0x01;  // FM-7 runs at 1.794MHz (normal speed)
             return val;
         }
         if (addr === FD01_KEY_DATA) {
@@ -463,8 +464,7 @@ export class FM7 {
         // Sub CPU status ($FD05 read)
         // bit 7 = BUSY. bit 0 = EXTDET.
         if (addr === FD05_SUB_CTRL) {
-            let ret = this._subBusy ? 0xFE : 0x7E;
-            return ret;
+            return this._subBusy ? 0xFE : 0x7E;
         }
 
         // $FD0B: FM77AV boot/mode register read
@@ -482,9 +482,6 @@ export class FM7 {
 
         // $FD0F: Reading enables BASIC ROM overlay
         if (addr === FD0F_ROM_SELECT) {
-            if (!this._basicRomEnabled) {
-                console.log(`[ROM] BASIC ROM ENABLED (read $FD0F) at PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
-            }
             this._basicRomEnabled = true;
             return 0xFE;
         }
@@ -559,9 +556,8 @@ export class FM7 {
             return this._opnDataBus;
         }
 
-        // $FD06/$FD07: RS-232C USART (stub: no device connected)
-        if (addr === 0xFD06) return 0x00;  // Data register (empty)
-        if (addr === 0xFD07) return 0x84;  // Status: TX ready, RX empty
+        // $FD06/$FD07: RS-232C USART (not installed: return open bus)
+        if (addr === 0xFD06 || addr === 0xFD07) return 0xFF;
 
         // $FD20-$FD2F: Kanji ROM ($FD20-$FD23, $FD2C-$FD2F) + reserved ($FD24-$FD2B)
         if (addr >= 0xFD20 && addr <= 0xFD2F) return 0xFF;
@@ -663,15 +659,14 @@ export class FM7 {
             const haltReq = (val & 0x80) !== 0;
             const cancelReq = (val & 0x40) !== 0;
 
+
             if (haltReq) {
-                // HALT request — set BUSY so $FD05 bit7=1 immediately.
                 if (!this._subHalted) {
                     this._subHalted = true;
                     this._subBusy = true;
                     this.scheduler.setSubHalted(true);
                 }
             } else {
-                // RUN request (release from halt)
                 if (this._subHalted) {
                     this._subHalted = false;
                     this.scheduler.setSubHalted(false);
@@ -681,7 +676,6 @@ export class FM7 {
             if (cancelReq) {
                 this._subCancel = true;
             }
-            // Every $FD05 write triggers sub CPU IRQ.
             this.subCPU.irq();
             return;
         }
@@ -1722,7 +1716,8 @@ export class FM7 {
         this._breakKey    = false;
         this._timerIRQ    = false;
         this._irqMaskReg  = 0;
-        this._basicRomEnabled = true; // BASIC ROM enabled on reset
+        // BASIC ROM: enabled on BASIC boot, disabled on DOS boot
+        this._basicRomEnabled = (this._bootMode === 'basic');
         this._fbasicWarnShown = false;
 
         // Reset OPN state
