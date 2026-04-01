@@ -318,6 +318,11 @@ export class FM7 {
                     : (addr - BOOT_ROM_BASE);
                 return this.initiateROM[romOffset];
             }
+            // FM77AV after Initiator ROM disabled: boot RAM (TWR) was written
+            // by the Initiator ROM's old boot code, so read from mainRAM
+            if (this.isFM77AV && this.romLoaded.initiate) {
+                return this.mainRAM[addr];
+            }
             // FM-7 BASIC boot: use boot_bas.rom (merged with boot_dos.rom vectors)
             if (this._basicBootStub) {
                 return this._basicBootStub[addr - BOOT_ROM_BASE];
@@ -471,10 +476,10 @@ export class FM7 {
         // Returns machine configuration: bit 0-1 = boot device, bit 6 = FM77AV ID
         if (addr === 0xFD0B) {
             if (this.isFM77AV) {
-                // bit 0: 0=DOS boot, 1=BASIC boot
+                // bit 0: 0=BASIC boot, 1=DOS boot (active high for DOS)
                 // bit 6: 0 = FM77AV present
                 let val = 0x00;
-                if (this._bootMode === 'basic') val |= 0x01;
+                if (this._bootMode !== 'basic') val |= 0x01;
                 return val;
             }
             return 0xFF;
@@ -696,12 +701,12 @@ export class FM7 {
             this._fd10Reg = val;
             if (this._initiatorActive) {
                 this._initiatorActive = false;
-                // After Initiator hands off, F-BASIC expects FM-7 compatible
-                // keyboard (ASCII codes). Switch keyboard to ASCII mode so
-                // Type-C ROM (or F-BASIC's own console) receives correct codes.
+                // After Initiator hands off to F-BASIC, switch sub-CPU to
+                // Type-C (FM-7 compatible) mode for full FM-7 software support.
+                // The Initiator ROM boots with Type-A but F-BASIC and FM-7
+                // tape software expect Type-C sub-system behavior.
                 if (this._bootMode === 'basic') {
-                    this.keyboard._useScanCodes = false;
-                    this.keyboard._enableBreakCodes = false;
+                    this._mainIOWrite(FD13_SUB_BANK, SUB_MONITOR_C);
                 }
                 console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
             }
@@ -734,6 +739,7 @@ export class FM7 {
             this.display.multiPage = 0;
             this.display.vramOffset[0] = 0;
             this.display.vramOffset[1] = 0;
+            this.display._scrollApplied = [0, 0];
             this.display.vramOffsetFlag = false;
             this.display.crtOn = false;
             this.display.vramaFlag = false;
@@ -1565,8 +1571,84 @@ export class FM7 {
         const len = Math.min(src.length, this.initiateROM.length);
         this.initiateROM.set(src.subarray(0, len));
         this._initiateROMSize = len;
+
+        // Detect original model for ROM info display
+        this._initiateOriginalModel = null;
+        if (len > 0x0B13) {
+            const b = [src[0x0B0E], src[0x0B0F], src[0x0B10], src[0x0B11], src[0x0B12], src[0x0B13]];
+            if (b.every(v => v === 0xFF)) {
+                this._initiateOriginalModel = 'FM77AV';
+            } else {
+                const str = String.fromCharCode(...b);
+                const models = {
+                    '200Ma.': 'FM77AV20', '201Ma.': 'FM77AV20EX',
+                    '400Ma.': 'FM77AV40', '401Ma.': 'FM77AV40EX/SX'
+                };
+                this._initiateOriginalModel = models[str] || `Unknown ("${str}")`;
+            }
+        }
+
         this.romLoaded.initiate = true;
         console.log(`Initiator ROM loaded: ${len} bytes`);
+    }
+
+    /**
+     * Patch Initiator ROM to behave as FM77AV (初代).
+     * 1. Force version string to all $FF (FM77AV identity)
+     * 2. Disable "new boot" code transfer (BRA → BRN)
+     * 3. Redirect new boot JMP $5000 → JMP $FE00 (old boot)
+     */
+    _patchInitiatorToAV() {
+        const rom = this.initiateROM;
+        const patches = [];
+
+        // 1. Version string patch: force all $FF at $0B0E-$0B13
+        if (rom[0x0B0E] !== 0xFF) {
+            for (let i = 0x0B0E; i <= 0x0B13; i++) {
+                rom[i] = 0xFF;
+            }
+            patches.push('version string → $FF');
+        }
+
+        // 2. Find and disable BRA to new boot transfer code
+        //    First locate LDU #$7C00 (CE 7C 00) — the new boot copy source setup.
+        //    Then find the BRA ($20) that branches to that address.
+        //    Patch BRA ($20 xx) → BRN ($21 xx) to skip new boot code copy.
+        let newBootCopyAddr = -1;
+        for (let i = 0; i < this._initiateROMSize - 2; i++) {
+            if (rom[i] === 0xCE && rom[i + 1] === 0x7C && rom[i + 2] === 0x00) {
+                newBootCopyAddr = i;
+                break;
+            }
+        }
+        if (newBootCopyAddr >= 0) {
+            for (let i = 0; i < this._initiateROMSize - 1; i++) {
+                if (rom[i] === 0x20) {
+                    const disp = rom[i + 1];
+                    const target = i + 2 + (disp > 127 ? disp - 256 : disp);
+                    if (target === newBootCopyAddr) {
+                        rom[i] = 0x21; // BRA → BRN (Branch Never)
+                        patches.push(`BRA→BRN at $${(0x6000 + i).toString(16).toUpperCase()}`);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Find and redirect JMP $5000 → JMP $FE00
+        //    Patch $7E $50 $00 → $7E $FE $00
+        for (let i = 0; i < this._initiateROMSize - 2; i++) {
+            if (rom[i] === 0x7E && rom[i + 1] === 0x50 && rom[i + 2] === 0x00) {
+                rom[i + 1] = 0xFE;
+                // rom[i + 2] stays 0x00
+                patches.push(`JMP $5000→$FE00 at $${(0x6000 + i).toString(16).toUpperCase()}`);
+                break;
+            }
+        }
+
+        if (patches.length > 0) {
+            console.warn(`Initiator ROM patched to FM77AV: ${patches.join(', ')}`);
+        }
     }
 
     /**
@@ -1729,6 +1811,11 @@ export class FM7 {
 
         // FM77AV specific reset
         if (this.isFM77AV) {
+            // Patch Initiator ROM to FM77AV (初代)
+            // Ensures any AV20/AV40/EX/SX ROM behaves as FM77AV
+            if (this._initiateROMSize > 0x0B13) {
+                this._patchInitiatorToAV();
+            }
             this._initiatorActive = true;  // Initiator ROM active at power-on
             this._subMonitorType = SUB_MONITOR_A;  // FM77AV boots with Type-A (native)
             // The Initiator ROM will write $FD13 to switch to Type-A
@@ -1918,6 +2005,9 @@ export class FM7 {
             cancelAnimationFrame(this._animFrameId);
             this._animFrameId = null;
         }
+
+        // Stop any active BEEP sound
+        this._beepStop();
 
         console.log('FM-7 emulation stopped');
     }
@@ -2157,38 +2247,64 @@ export class FM7 {
 
         this._beepStop(); // Stop any existing beep
 
+        const now = ctx.currentTime;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'square';
-        osc.frequency.value = 2400; // FM-7 BEEP frequency ~2.4kHz
-        gain.gain.value = 0.15;
+        osc.frequency.value = 1200; // FM-7 BEEP frequency ~1.2kHz
+
+        // Smooth gain ramp to avoid click noise
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.15, now + 0.003); // 3ms fade-in
+
         osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
+        // Route through PSG volume control so BEEP respects the volume slider
+        gain.connect(this.psg._gainNode || ctx.destination);
+        osc.start(now);
 
         this._beepOsc = osc;
         this._beepGain = gain;
         this._beepContinuous = (durationMs < 0);
 
         if (durationMs > 0) {
-            this._beepTimer = setTimeout(() => this._beepStop(), durationMs);
+            // Use Web Audio API scheduling instead of setTimeout for precise timing
+            const endTime = now + durationMs / 1000;
+            gain.gain.setValueAtTime(0.15, endTime - 0.003);
+            gain.gain.linearRampToValueAtTime(0, endTime); // 3ms fade-out
+            osc.stop(endTime + 0.001);
+            // Clean up references after oscillator ends
+            osc.onended = () => {
+                if (this._beepOsc === osc) {
+                    this._beepOsc = null;
+                    this._beepGain = null;
+                    this._beepContinuous = false;
+                }
+            };
         }
     }
 
     /** Stop BEEP tone. */
     _beepStop() {
         if (this._beepOsc) {
-            try { this._beepOsc.stop(); } catch (e) { /* ignore */ }
-            this._beepOsc.disconnect();
+            const ctx = this.psg._audioCtx;
+            if (ctx && this._beepGain) {
+                // Smooth fade-out to avoid click
+                const now = ctx.currentTime;
+                this._beepGain.gain.cancelScheduledValues(now);
+                this._beepGain.gain.setValueAtTime(this._beepGain.gain.value, now);
+                this._beepGain.gain.linearRampToValueAtTime(0, now + 0.003);
+                try { this._beepOsc.stop(now + 0.005); } catch (e) { /* ignore */ }
+            } else {
+                try { this._beepOsc.stop(); } catch (e) { /* ignore */ }
+                this._beepOsc.disconnect();
+            }
             this._beepOsc = null;
         }
         if (this._beepGain) {
-            this._beepGain.disconnect();
+            // Don't disconnect immediately - let fade-out complete
+            const g = this._beepGain;
             this._beepGain = null;
-        }
-        if (this._beepTimer) {
-            clearTimeout(this._beepTimer);
-            this._beepTimer = null;
+            setTimeout(() => { try { g.disconnect(); } catch (e) {} }, 10);
         }
         this._beepContinuous = false;
     }

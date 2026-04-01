@@ -1055,8 +1055,12 @@ export class Display {
         this._scrollApplied[pg] = newOffset;
         this.vramOffset[pg] = 0;
 
-        // Reset the sub CPU's software mirror of the offset
-        if (this.workRam) {
+        // Reset the sub CPU's software mirror of the offset.
+        // FM-7 ROM re-calculates from 0 each scroll, so we must reset.
+        // FM77AV ROM sends cumulative offsets based on work RAM, so
+        // resetting would break the next scroll (ROM would re-send the
+        // same value, giving scrollAmount=0).
+        if (this.workRam && !this.isAV) {
             this.workRam[0x101F] = 0;
             this.workRam[0x1020] = 0;
         }
@@ -1372,6 +1376,7 @@ export class Display {
         this.clearWorkRam();
         this.resetPalette();
         this.vramOffset = [0, 0];
+        this._scrollApplied = [0, 0];
         this._vramOffsetCount = [0, 0];
         this.vramOffsetFlag = false;
         this.crtOn = false;

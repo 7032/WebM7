@@ -65,8 +65,8 @@
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
                 <label style="margin:0;">Boot:</label>
                 <div class="radio-group">
-                    <label><input type="radio" name="bootMode" value="dos" checked> DOS</label>
-                    <label><input type="radio" name="bootMode" value="basic"> BASIC</label>
+                    <label><input type="radio" name="bootMode" value="dos"> DOS</label>
+                    <label><input type="radio" name="bootMode" value="basic" checked> BASIC</label>
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -77,10 +77,14 @@
                     <label><input type="radio" name="joyPort" value="1"> Port 2</label>
                 </div>
             </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+                <label style="margin:0;"><input type="checkbox" id="cursorToNumpad"> Cursor → Numpad</label>
+            </div>
             <div class="btn-row">
                 <button id="playStopBtn" class="btn-start">Power On</button>
                 <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
+                <button id="screenshotBtn" style="font-size:10px;padding:2px 6px;" title="Save screenshot as PNG">📷</button>
             </div>
         </div>
 
@@ -143,6 +147,12 @@
                     <input type="file" id="romFBasicAV" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusFBasicAV">--</span>
                 </div>
+            </div>
+            <div id="romInfoPanel" style="margin-top:6px;font-size:10px;color:#aaa;display:none;">
+                <details>
+                    <summary style="cursor:pointer;color:#8af;">ROM Info <button id="romInfoCopyBtn" style="font-size:8px;padding:0 4px;margin-left:4px;cursor:pointer;">Copy</button></summary>
+                    <pre id="romInfoText" style="margin:4px 0;white-space:pre-wrap;word-break:break-all;font-size:8px;line-height:1.3;max-height:150px;overflow-y:auto;overflow-x:hidden;"></pre>
+                </details>
             </div>
         </div>
 
@@ -373,10 +383,11 @@
         <h3>右側 — サイドパネル</h3>
         <table>
         <tr><th>セクション</th><th>内容</th></tr>
-        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、Joystick ポート（Port 1 / Port 2）の選択。Power On/Off（トグル）、Pause/Resume、Reset（即座に再起動）ボタン</td></tr>
-        <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功</td></tr>
-        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し</td></tr>
-        <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示、パレット、PSG レジスタ</td></tr>
+        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、FM Sound Card（FM-7のみ）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Power On/Off、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
+        <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功。ROM Info で読み込み済みROMのサイズ・ハッシュを確認可能（Copy ボタンでクリップボードにコピー）</td></tr>
+        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
+        <tr><td><strong>Tape Image</strong></td><td>T77 形式のテープイメージをセット。REW（巻き戻し）、Eject ボタン。CMT LED付き</td></tr>
+        <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示・FM-7キーボードレイアウト、BREAK キー変更、パレット、PSG レジスタ</td></tr>
         </table>
 
         <h2>Input Monitor</h2>
@@ -396,6 +407,17 @@
         <li><strong>2P対応</strong> — 2つ目のゲームパッドは自動的にもう一方のポートに割り当てられます</li>
         </ul>
         <p>Input Monitor パネル（ツールバーの INPUT ボタン）でジョイスティックの入力状態をリアルタイムで確認できます。</p>
+
+        <h2>キーボード</h2>
+        <ul>
+        <li><strong>キー入力方式</strong> — <code>event.code</code>（物理キー位置）ベースでマッピングしています。JIS配列（106/109キー）・US配列（101/104キー）のどちらでも同じ配置で使えます</li>
+        <li><strong>Cursor → Numpad</strong> — テンキーのないキーボード向けのオプションです。Control セクションでチェックを入れると、カーソルキー（↑↓←→）がテンキーの 8/2/4/6 として動作します。テンキーを使うゲームに便利です</li>
+        <li><strong>BREAK キー</strong> — デフォルトでは <code>`</code>（バッククォート）キーまたは <code>Pause</code> キーが BREAK キーに割り当てられています。Debug パネルの「BREAK Key」セクションで変更できます</li>
+        <li><strong>CAPS / カナ / INS</strong> — それぞれ CapsLock / 右Alt（またはカナキー） / Insert キーで切り替え。状態はキーボードレイアウト表示のLEDで確認できます</li>
+        </ul>
+
+        <h2>スクリーンショット</h2>
+        <p>Control セクションの 📷 ボタンで、現在の画面をPNG画像として保存できます。640×200モード・320×200モードともに 640×400 ピクセルで保存されます。</p>
 
         <h2>フルスクリーン</h2>
         <p>ツールバーの <strong>FULL</strong> ボタンまたは <strong>F11</strong> キーでエミュレータ画面をフルスクリーン表示できます。もう一度押すと元に戻ります。</p>
@@ -586,7 +608,10 @@ function updateMachineType() {
 }
 
 document.querySelectorAll('input[name="machineType"]').forEach(radio => {
-    radio.addEventListener('change', updateMachineType);
+    radio.addEventListener('change', () => {
+        updateMachineType();
+        if (typeof updateRomInfo === 'function') updateRomInfo();
+    });
 });
 
 // Lock control groups during VM run (machineType, bootMode, fmCard locked; joyPort stays live)
@@ -646,6 +671,68 @@ if (savedJoyPort !== null) {
     const radio = document.querySelector(`input[name="joyPort"][value="${port}"]`);
     if (radio) radio.checked = true;
 }
+
+// =========================================================================
+// Cursor → Numpad preset
+// =========================================================================
+
+const CURSOR_TO_NUMPAD = {
+    'ArrowUp':    'Numpad8',
+    'ArrowDown':  'Numpad2',
+    'ArrowLeft':  'Numpad4',
+    'ArrowRight': 'Numpad6',
+};
+
+const cursorToNumpadCheck = document.getElementById('cursorToNumpad');
+
+function applyCursorToNumpad(enabled) {
+    if (enabled) {
+        fm7.keyboard.setCustomMap(CURSOR_TO_NUMPAD);
+    } else {
+        fm7.keyboard.clearCustomMap();
+    }
+}
+
+cursorToNumpadCheck.addEventListener('change', () => {
+    const on = cursorToNumpadCheck.checked;
+    applyCursorToNumpad(on);
+    localStorage.setItem('fm7_cursor_to_numpad', on ? '1' : '0');
+});
+
+// Restore saved state
+const savedCursorToNumpad = localStorage.getItem('fm7_cursor_to_numpad');
+if (savedCursorToNumpad === '1') {
+    cursorToNumpadCheck.checked = true;
+    applyCursorToNumpad(true);
+}
+
+// =========================================================================
+// Screenshot
+// =========================================================================
+
+document.getElementById('screenshotBtn').addEventListener('click', () => {
+    // Canvas is 640x200 (native pixels); double vertically to 640x400
+    // to match the actual display aspect ratio (CRT scanlines were tall)
+    const w = canvas.width;
+    const h = canvas.height;
+    const tmp = document.createElement('canvas');
+    tmp.width = w;
+    tmp.height = h * 2;
+    const ctx = tmp.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(canvas, 0, 0, w, h * 2);
+    tmp.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const machineType = document.querySelector('input[name="machineType"]:checked').value;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.download = `${machineType}_${ts}.png`;
+        a.href = url;
+        a.click();
+        URL.revokeObjectURL(url);
+    }, 'image/png');
+});
 
 // =========================================================================
 // Volume Control
@@ -777,6 +864,7 @@ function setupIndividualROM(input, loaderFn, statusEl) {
             const data = await file.arrayBuffer();
             loaderFn(data);
             markLoaded(statusEl);
+            if (typeof updateRomInfo === 'function') setTimeout(updateRomInfo, 100);
         } catch (err) {
             statusEl.textContent = 'Error';
             console.error(`Failed to load ROM:`, err);
@@ -795,6 +883,94 @@ setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysA
 setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl);
 setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl);
 setupIndividualROM(romFBasicAVInput, (d) => fm7.loadFBasicROM(d),  statusFBasicAVEl);
+
+// =========================================================================
+// ROM Info Display (MD5, size, model detection)
+// =========================================================================
+
+async function hashHex(buffer) {
+    // Try Web Crypto API (HTTPS only), fallback to simple CRC32-style hash
+    try {
+        if (crypto.subtle) {
+            const hash = await crypto.subtle.digest('SHA-256', buffer);
+            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+    } catch(e) {}
+    // Fallback: FNV-1a 32-bit hash
+    const u8 = new Uint8Array(buffer);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < u8.length; i++) {
+        h ^= u8[i]; h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+
+async function updateRomInfo() {
+    const panel = document.getElementById('romInfoPanel');
+    const text = document.getElementById('romInfoText');
+    const lines = [];
+
+    const isAV = document.querySelector('input[name="machineType"]:checked').value === 'fm77av';
+    const roms = [
+        { name: 'FBASIC30.ROM', data: fm7.fbasicROM, loaded: fm7.romLoaded.fbasic,
+          size: fm7._fbasicSize },
+        { name: 'BOOT_BAS.ROM', data: fm7.bootBasROM, loaded: fm7.romLoaded.bootBas,
+          size: fm7._bootBasSize },
+        { name: 'BOOT_DOS.ROM', data: fm7.bootROM, loaded: fm7.romLoaded.boot,
+          size: fm7._bootSize },
+        { name: 'SUBSYS_C.ROM', data: fm7.subROM, loaded: fm7.romLoaded.sub,
+          size: fm7._subSize },
+        ...(isAV ? [
+            { name: 'INITIATE.ROM', data: fm7.initiateROM, loaded: fm7.romLoaded.initiate,
+              size: fm7._initiateROMSize },
+            { name: 'SUBSYS_A.ROM', data: fm7.subROM_A, loaded: fm7.romLoaded.subA,
+              size: fm7._subROM_ASize },
+            { name: 'SUBSYS_B.ROM', data: fm7.subROM_B, loaded: fm7.romLoaded.subB,
+              size: fm7._subROM_BSize },
+            { name: 'SUBSYSCG.ROM', data: fm7.cgROM, loaded: fm7.romLoaded.cg,
+              size: fm7._cgSize },
+        ] : []),
+    ];
+
+    let anyLoaded = false;
+    for (const rom of roms) {
+        if (!rom.loaded || !rom.data) continue;
+        anyLoaded = true;
+        const size = rom.size || rom.data.byteLength || rom.data.length;
+        const buf = (rom.data instanceof ArrayBuffer) ? rom.data : rom.data.buffer;
+        const hash = await hashHex(buf.slice(0, size));
+        let info = `${rom.name}: ${size} bytes  hash=${hash}`;
+        if (rom.name === 'INITIATE.ROM' && fm7._initiateOriginalModel) {
+            info += `\n  → Original model: ${fm7._initiateOriginalModel}`;
+        }
+        lines.push(info);
+    }
+
+    if (anyLoaded) {
+        text.textContent = lines.join('\n');
+        panel.style.display = '';
+    } else {
+        panel.style.display = 'none';
+    }
+}
+
+// ROM Info: Copy to clipboard
+document.getElementById('romInfoCopyBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const text = document.getElementById('romInfoText').textContent;
+    if (text) {
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = e.target;
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 1000);
+        });
+    }
+});
+
+// Update ROM info after folder load
+romFolderInput.addEventListener('change', () => setTimeout(updateRomInfo, 500));
 
 function markLoaded(el) {
     el.textContent = 'OK';

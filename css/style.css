@@ -136,11 +136,13 @@ input[type="range"]#volumeSlider {
 /* ===== Right Column: Side Panel ===== */
 .side-panel {
     width: 280px;
+    min-width: 280px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: calc(400px + 32px + 8px + 34px);
+    max-height: calc(100vh - 120px);
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .side-panel::-webkit-scrollbar {
@@ -157,6 +159,9 @@ input[type="range"]#volumeSlider {
     border: 1px solid #333;
     border-radius: 6px;
     padding: 10px 12px;
+    overflow: hidden;
+    flex-shrink: 0;
+    box-sizing: border-box;
 }
 
 .sp-section h3 {
@@ -226,6 +231,7 @@ input[type="file"]::file-selector-button:hover {
 .rom-item input[type="file"] {
     flex: 1;
     min-width: 0;
+    overflow: hidden;
 }
 
 /* FM77AV ROM list separator */
@@ -309,6 +315,7 @@ input[type="radio"] { accent-color: #00cc66; }
 /* Buttons */
 .btn-row {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin-top: 4px;
 }

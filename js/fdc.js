@@ -694,10 +694,11 @@ export class FDC {
             this.cmdFlags.e = (cmd & 0x04) !== 0;
             this.cmdFlags.a0 = (cmd & 0x01) !== 0; // DAM flag for write
 
-            // No disk inserted: return Record Not Found (not NOT_READY).
-            // Drive is physically present; RNF indicates no readable data.
+            // No disk inserted: return NOT_READY.
+            // MB8877 reports NOT_READY when drive has no media.
+            // Boot ROMs check for NOT_READY to skip disk boot immediately.
             if (!this.currentDisk || !this.currentDisk.loaded) {
-                this._completeCommand(STATUS.RNF);
+                this._completeCommand(STATUS.NOT_READY);
                 return;
             }
 
@@ -727,7 +728,7 @@ export class FDC {
             this.cmdFlags.e = (cmd & 0x04) !== 0;
 
             if (!this.currentDisk || !this.currentDisk.loaded) {
-                this._completeCommand(STATUS.RNF);
+                this._completeCommand(STATUS.NOT_READY);
                 return;
             }
 
@@ -739,6 +740,10 @@ export class FDC {
         if (cmdHigh === 0xE0) {
             // Read Track
             this.commandType = CMD_TYPE.TYPE_III;
+            if (!this.currentDisk || !this.currentDisk.loaded) {
+                this._completeCommand(STATUS.NOT_READY);
+                return;
+            }
             this.state = FDC_STATE.READ_TRACK;
             this.delayCycles = 0;
             return;
@@ -747,7 +752,11 @@ export class FDC {
         if (cmdHigh === 0xF0) {
             // Write Track (Format)
             this.commandType = CMD_TYPE.TYPE_III;
-            if (this.currentDisk && this.currentDisk.writeProtect) {
+            if (!this.currentDisk || !this.currentDisk.loaded) {
+                this._completeCommand(STATUS.NOT_READY);
+                return;
+            }
+            if (this.currentDisk.writeProtect) {
                 this._completeCommand(STATUS.WRITE_PROTECT);
                 return;
             }

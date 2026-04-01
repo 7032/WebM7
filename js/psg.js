@@ -331,7 +331,8 @@ export class PSG {
                         buf[i] = this._ringBuf[rp];
                         rp = (rp + 1) & BUF_MASK;
                     } else {
-                        buf[i] = 0;          // Underrun → silence
+                        // Underrun: hold last known sample to avoid clicks
+                        buf[i] = (i > 0) ? buf[i - 1] : 0;
                     }
                 }
                 this._rPos = rp;

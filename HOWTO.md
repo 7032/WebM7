@@ -33,13 +33,10 @@ js/
   display.js        画面描画（VRAM、ALU、ライン描画、パレット、320×200/640×200）
   fdc.js            フロッピーディスクコントローラ（MB8877、D77/2Dパーサ）
   cmt.js            カセットテープコントローラ（T77パーサ、バイトオーダー自動検出、FSKスケール自動検出）
-  keyboard.js       キーボード入力（FM-7 ASCIIモード / FM77AV スキャンコードモード）
-  psg.js            PSG音源（AY-3-8910）
+  keyboard.js       キーボード入力（FM-7 ASCIIモード / FM77AV スキャンコードモード、カスタムリマップ対応）
+  psg.js            PSG音源（AY-3-8910）+ BEEP
   opn.js            OPN FM音源（YM2203: 3ch FM合成 + SSG + タイマー）
   scheduler.js      タイミング制御（デュアルCPU同期、イベントスケジューラ）
-docs/
-  fm77av-design.md      FM77AV対応 設計書
-  fm77av-hardware-ref.md FM77AV ハードウェアリファレンス（FM-7との差分）
 ```
 
 ## 対応機種

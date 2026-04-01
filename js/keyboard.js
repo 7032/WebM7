@@ -255,6 +255,10 @@ export class Keyboard {
         this.capsLock = false;
         this.kanaMode = false;
         this.insMode = false;
+
+        // --- Custom key remapping ---
+        /** @type {Map<string, string>} PC event.code → PC event.code remap */
+        this._customMap = new Map();
     }
 
     // ------------------------------------------------------------------
@@ -285,6 +289,7 @@ export class Keyboard {
         if (fm7Code === FM7_KEY_NONE) return;
 
         event.preventDefault();
+        // Track by original code so keyUp can match correctly
         this._heldKeys.add(code);
         this._pushKey(fm7Code & 0x7F);
     }
@@ -303,8 +308,10 @@ export class Keyboard {
         if (!this._heldKeys.has(code)) return;
         this._heldKeys.delete(code);
 
+        // Check remapped code for preventDefault
+        const remapped = this._customMap.get(code) || code;
         const tbl = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
-        if (tbl.has(code)) {
+        if (tbl.has(remapped)) {
             event.preventDefault();
         }
 
@@ -416,6 +423,30 @@ export class Keyboard {
     }
 
     // ------------------------------------------------------------------
+    // Custom key remapping
+    // ------------------------------------------------------------------
+
+    /**
+     * Set custom key remappings.
+     * @param {Map<string, string>|Object} map - PC event.code → PC event.code
+     */
+    setCustomMap(map) {
+        this._customMap.clear();
+        if (map instanceof Map) {
+            for (const [k, v] of map) this._customMap.set(k, v);
+        } else if (map && typeof map === 'object') {
+            for (const [k, v] of Object.entries(map)) this._customMap.set(k, v);
+        }
+    }
+
+    /**
+     * Clear all custom key remappings.
+     */
+    clearCustomMap() {
+        this._customMap.clear();
+    }
+
+    // ------------------------------------------------------------------
     // Reset
     // ------------------------------------------------------------------
 
@@ -446,12 +477,15 @@ export class Keyboard {
      * @returns {number} FM-7 key code, or FM7_KEY_NONE if unmapped
      */
     _mapKey(code, shifted) {
+        // Apply custom remap: PC code → PC code
+        const remapped = this._customMap.get(code) || code;
+
         const table = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
-        if (!this._useScanCodes && shifted && SHIFTED_OVERRIDE.has(code)) {
-            return SHIFTED_OVERRIDE.get(code);
+        if (!this._useScanCodes && shifted && SHIFTED_OVERRIDE.has(remapped)) {
+            return SHIFTED_OVERRIDE.get(remapped);
         }
-        if (table.has(code)) {
-            return table.get(code);
+        if (table.has(remapped)) {
+            return table.get(remapped);
         }
         return FM7_KEY_NONE;
     }
