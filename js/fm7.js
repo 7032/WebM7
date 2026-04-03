@@ -129,6 +129,8 @@ export class FM7 {
 
         // --- I/O state ---
         this._subHalted   = true;   // Sub CPU starts halted after reset
+        this._subHaltRequest = false; // Deferred HALT request (applied after sub CPU instruction)
+        this._subCancelRequest = false; // Deferred CANCEL request
         this._subBusy     = true;   // Sub CPU BUSY flag (set on reset, cleared by sub CPU reading $D40A)
         this._subCancel   = false;  // Sub CPU CANCEL flag
         this._subAttn     = false;  // Sub CPU attention flag (FIRQ to main CPU)
@@ -304,30 +306,25 @@ export class FM7 {
             return this._mainIORead(addr);
         }
 
-        // $FE00-$FFFF: Boot ROM / Initiator ROM
+        // $FE00-$FFFF: Boot ROM area
+        // With boot ROM bypass, this area is plain RAM (vectors written by reset()).
+        // Initiator ROM overlay is no longer active (bypassed in reset).
         if (addr >= BOOT_ROM_BASE) {
-            // $FFE0-$FFFF: Always read from RAM (interrupt vectors live in RAM)
+            // $FFE0-$FFFF: Interrupt vectors in RAM
             if (addr >= 0xFFE0) {
                 return this.mainRAM[addr];
             }
-            if (this.isFM77AV && this._initiatorActive && this.romLoaded.initiate) {
-                // Initiator ROM vector area: last 512 bytes map to $FE00-$FFFF
-                const romSize = this._initiateROMSize || BOOT_ROM_SIZE;
-                const romOffset = (romSize > BOOT_ROM_SIZE)
-                    ? (addr - BOOT_ROM_BASE) + (romSize - BOOT_ROM_SIZE)
-                    : (addr - BOOT_ROM_BASE);
-                return this.initiateROM[romOffset];
-            }
-            // FM77AV after Initiator ROM disabled: boot RAM (TWR) was written
-            // by the Initiator ROM's old boot code, so read from mainRAM
-            if (this.isFM77AV && this.romLoaded.initiate) {
+            // $FE00-$FFDF: After bypass, this is RAM.
+            // FM77AV: Initiator ROM is bypassed, _initiatorActive stays false.
+            // FM-7: Boot ROM code is bypassed.
+            if (this.isFM77AV) {
                 return this.mainRAM[addr];
             }
-            // FM-7 BASIC boot: use boot_bas.rom (merged with boot_dos.rom vectors)
-            if (this._basicBootStub) {
-                return this._basicBootStub[addr - BOOT_ROM_BASE];
+            // FM-7: boot ROM if loaded, otherwise RAM
+            if (this.romLoaded.boot) {
+                return this.bootROM[addr - BOOT_ROM_BASE];
             }
-            return this.bootROM[addr - BOOT_ROM_BASE];
+            return this.mainRAM[addr];
         }
 
         return 0xFF;
@@ -660,28 +657,16 @@ export class FM7 {
         // FM-7 I/O $FD05 write: sub CPU control
         // bit 7: 1 = HALT request, 0 = RUN request
         // bit 6: CANCEL IRQ
+        // Like real hardware, HALT/RUN is a REQUEST that takes
+        // effect after the sub CPU completes its current instruction.
+        // _subHaltAck() applies the request at the instruction boundary.
         if (addr === FD05_SUB_CTRL) {
-            const haltReq = (val & 0x80) !== 0;
-            const cancelReq = (val & 0x40) !== 0;
-
-
-            if (haltReq) {
-                if (!this._subHalted) {
-                    this._subHalted = true;
-                    this._subBusy = true;
-                    this.scheduler.setSubHalted(true);
-                }
-            } else {
-                if (this._subHalted) {
-                    this._subHalted = false;
-                    this.scheduler.setSubHalted(false);
-                }
+            this._subHaltRequest = (val & 0x80) !== 0;
+            if (val & 0x40) {
+                // Cancel IRQ: assert IRQ on sub CPU
+                this._subCancelRequest = true;
+                this.subCPU.intr |= 0x04; // INTR_IRQ
             }
-
-            if (cancelReq) {
-                this._subCancel = true;
-            }
-            this.subCPU.irq();
             return;
         }
 
@@ -751,6 +736,8 @@ export class FM7 {
             // Reset NMI mask (NMI enabled after sub reset)
             this._nmiMaskSub = false;
             this._blankFlag = true;  // Blanking active after reset
+            this._subHaltRequest = false;
+            this._subCancelRequest = false;
 
             // Keyboard mode: Type-A/B ROMs have internal scan-to-ASCII
             // conversion, so the keyboard sends scan codes. Type-C ROM
@@ -1309,6 +1296,10 @@ export class FM7 {
                 // Check and assert IRQ/FIRQ on main CPU (level-triggered)
                 this._checkAndAssertInterrupts();
 
+                // Apply deferred HALT/RUN at instruction boundary
+                // (real hardware applies halt at instruction boundary)
+                this._subHaltAck();
+
                 // Sub CPU: catch up to main CPU
                 if (!this.scheduler.subHalted && this.subCPU) {
                     let subGuard = 1000;
@@ -1321,6 +1312,9 @@ export class FM7 {
                             break;
                         }
                         this.scheduler.subCyclesTotal += subElapsed;
+                        // Also check after each sub CPU instruction for responsive halt
+                        this._subHaltAck();
+                        if (this.scheduler.subHalted) break;
                         if (--subGuard <= 0) break;
                     }
                 }
@@ -1403,6 +1397,36 @@ export class FM7 {
         // Main CPU FIRQ is edge-triggered: asserted once when sub CPU
         // reads $D404 (in _subRead). Do NOT re-assert here every cycle,
         // or the main CPU gets stuck in infinite FIRQ.
+    }
+
+    // =========================================================================
+    // Sub CPU HALT acknowledge (deferred application)
+    // =========================================================================
+
+    /**
+     * Apply pending HALT/RUN/CANCEL requests at sub CPU instruction boundary.
+     * Called after each sub CPU instruction completes.
+     * Real hardware applies halt at instruction boundaries.
+     */
+    _subHaltAck() {
+        // Apply HALT/RUN request
+        if (this._subHaltRequest) {
+            if (!this._subHalted) {
+                this._subHalted = true;
+                this._subBusy = true;
+                this.scheduler.setSubHalted(true);
+            }
+        } else {
+            if (this._subHalted) {
+                this._subHalted = false;
+                this.scheduler.setSubHalted(false);
+            }
+        }
+        // Apply CANCEL request
+        if (this._subCancelRequest) {
+            this._subCancel = true;
+            this._subCancelRequest = false;
+        }
     }
 
     // =========================================================================
@@ -1779,9 +1803,14 @@ export class FM7 {
 
     /**
      * Reset the entire system.
-     * @param {string} bootMode - 'dos' or 'basic'
+     * Boot mode is auto-detected: disk in drive 0 → DOS, else → BASIC.
      */
-    reset(bootMode = 'dos') {
+    reset() {
+        // =====================================================================
+        // Auto boot mode: disk in drive 0 → DOS, otherwise → BASIC
+        // =====================================================================
+        const hasDisk = this.fdc.disks[0] && this.fdc.disks[0].loaded;
+        const bootMode = hasDisk ? 'dos' : 'basic';
         this._bootMode = bootMode;
 
         // Clear main RAM; shared RAM to 0xFF (FM-7 hardware default)
@@ -1791,7 +1820,7 @@ export class FM7 {
         // Reset I/O state
         this._subHalted   = false;  // Sub CPU runs after reset
         this._subHaltRequest = false;
-        this._subHaltDeferred = 0;
+        this._subCancelRequest = false;
         this._subBusy     = true;   // BUSY set on reset (sub CPU clears via $D40A read during init)
         this._subCancel   = false;
         this._subAttn     = false;
@@ -1799,7 +1828,7 @@ export class FM7 {
         this._timerIRQ    = false;
         this._irqMaskReg  = 0;
         // BASIC ROM: enabled on BASIC boot, disabled on DOS boot
-        this._basicRomEnabled = (this._bootMode === 'basic');
+        this._basicRomEnabled = (bootMode === 'basic');
         this._fbasicWarnShown = false;
 
         // Reset OPN state
@@ -1811,14 +1840,17 @@ export class FM7 {
 
         // FM77AV specific reset
         if (this.isFM77AV) {
-            // Patch Initiator ROM to FM77AV (初代)
-            // Ensures any AV20/AV40/EX/SX ROM behaves as FM77AV
+            // Initiator ROM is no longer executed — all init done in JS.
+            // Patching is still done for reference/logging but ROM is not run.
             if (this._initiateROMSize > 0x0B13) {
                 this._patchInitiatorToAV();
             }
-            this._initiatorActive = true;  // Initiator ROM active at power-on
-            this._subMonitorType = SUB_MONITOR_A;  // FM77AV boots with Type-A (native)
-            // The Initiator ROM will write $FD13 to switch to Type-A
+            this._initiatorActive = false; // Initiator ROM bypassed — start disabled
+            // Start in Type-C (FM-7 compatible) for both BASIC and DOS.
+            // Many FM77AV DOS games use FM-7 compatible sub CPU protocol
+            // with FM77AV display features ($FD12 for 320x200).
+            // Software that needs Type-A will switch via $FD13.
+            this._subMonitorType = SUB_MONITOR_C;
             this._cgRomBank = 0;
             this._nmiMaskSub = false;
             this._subResetFlag = false;
@@ -1843,9 +1875,19 @@ export class FM7 {
             this.display.analogPalette = this._analogPalette;
             // Enable FM77AV features in display (ALU, line drawing)
             this.display.isAV = true;
-            // FM77AV: scan codes + break codes
-            this.keyboard._enableBreakCodes = true;
-            this.keyboard._useScanCodes = true;
+            // Keyboard mode depends on boot mode:
+            //   BASIC (Type-C): ASCII codes, no break codes — F-BASIC expects ASCII
+            //   DOS (Type-C display): scan codes + break codes — FM77AV games
+            //     expect scan codes at $FD01 (designed for Type-A).
+            //     $FD01 reads directly from keyboard module, not through sub CPU,
+            //     so Type-C sub ROM doesn't interfere with scan code delivery.
+            if (bootMode === 'dos') {
+                this.keyboard._enableBreakCodes = true;
+                this.keyboard._useScanCodes = true;
+            } else {
+                this.keyboard._enableBreakCodes = false;
+                this.keyboard._useScanCodes = false;
+            }
         } else {
             this._initiatorActive = false;
             this._subMonitorType = SUB_MONITOR_C;
@@ -1853,10 +1895,12 @@ export class FM7 {
             this.display.analogPalette = null;
             this.display.isAV = false;
             // FM-7: ASCII character codes, no break codes
-            // FM-7 keyboard encoder outputs ASCII, sub CPU passes through
             this.keyboard._enableBreakCodes = false;
             this.keyboard._useScanCodes = false;
         }
+
+        // _basicBootStub is no longer used — boot ROM code is bypassed entirely
+        this._basicBootStub = null;
 
         // Reset all components
         this.display.reset();
@@ -1867,96 +1911,211 @@ export class FM7 {
         this.opn.reset();
         this.scheduler.reset();
 
-        // Re-apply keyboard mode after reset
+        // Re-apply keyboard mode after component reset (components may clear it)
         if (this.isFM77AV) {
-            this.keyboard._enableBreakCodes = true;
-            this.keyboard._useScanCodes = true;
-        }
-
-        // For FM-7 BASIC boot: install a minimal boot stub that jumps
-        // directly to F-BASIC cold start ($8000), bypassing boot_dos.rom
-        // which tries disk boot and fails without proper NOT_READY handling.
-        // On real FM-7 without disk controller, the boot ROM at $FE00 simply
-        // jumps to F-BASIC. With disk controller in BASIC mode, the DIP switch
-        // or boot ROM variant skips disk boot.
-        if (bootMode === 'basic' && this.romLoaded.bootBas) {
-            if (this.isFM77AV) {
-                // FM77AV BASIC boot: Initiator ROM handles boot device selection
-                // via $FD0B bit0 (1=BASIC). Initiator reads $FD0B and branches
-                // to F-BASIC cold start instead of disk boot.
-                // No stub needed — Initiator ROM + $FD0B is sufficient.
-                this._basicBootStub = null;
+            if (bootMode === 'dos') {
+                this.keyboard._enableBreakCodes = true;
+                this.keyboard._useScanCodes = true;
             } else {
-                // FM-7 BASIC boot: use boot_bas.rom ($FE00-$FFDF code area)
-                this._basicBootStub = new Uint8Array(BOOT_ROM_SIZE);
-                this._basicBootStub.set(this.bootBasROM);
+                this.keyboard._enableBreakCodes = false;
+                this.keyboard._useScanCodes = false;
             }
-        } else {
-            this._basicBootStub = null;
         }
 
-        // $FFE0-$FFFF is always RAM on FM-7 (interrupt vectors, reset vector)
-        // Write interrupt/reset vectors to RAM at $FFE0-$FFFF.
-        // CPU reads vectors from RAM (the $FFE0+ area is always RAM).
-        {
-            const bootSrc = this._basicBootStub || this.bootROM;
-            // Step 1: Copy boot ROM vectors (IRQ, NMI, FIRQ, SWI, etc.)
+        // =====================================================================
+        // Boot ROM bypass: perform boot sequence directly in JS
+        // Instead of running INITIATE.ROM / BOOT_BAS / BOOT_DOS 6809 code,
+        // we initialize hardware state and set the main CPU PC directly.
+        // =====================================================================
+
+        // Set up interrupt vectors in RAM ($FFE0-$FFFF).
+        // Use boot_dos.rom vectors if available (they contain SWI/IRQ/NMI handlers).
+        // These point to low-RAM stubs that F-BASIC will overwrite during init.
+        if (this.romLoaded.boot) {
             for (let i = 0xFFE0; i <= 0xFFFF; i++) {
-                const romByte = bootSrc[i - BOOT_ROM_BASE];
+                const romByte = this.bootROM[i - BOOT_ROM_BASE];
                 if (romByte !== 0xFF) {
                     this.mainRAM[i] = romByte;
                 }
             }
-            // Step 2: FM77AV — overlay with Initiator ROM vectors.
-            // The initiator ROM defines only the reset vector ($6000),
-            // all others are $FF. This overwrites boot ROM's $FE00 reset
-            // with the initiator's $6000 entry point.
-            if (this.isFM77AV && this.romLoaded.initiate) {
-                const romSize = this._initiateROMSize || BOOT_ROM_SIZE;
-                for (let i = 0xFFE0; i <= 0xFFFF; i++) {
-                    const romOffset = (romSize > BOOT_ROM_SIZE)
-                        ? (i - BOOT_ROM_BASE) + (romSize - BOOT_ROM_SIZE)
-                        : (i - BOOT_ROM_BASE);
-                    const romByte = this.initiateROM[romOffset];
-                    if (romByte !== 0xFF) {
-                        this.mainRAM[i] = romByte;
-                    }
-                }
-            }
-            // Fallback: ensure reset vector is not $0000
-            if (this.mainRAM[0xFFFE] === 0x00 && this.mainRAM[0xFFFF] === 0x00) {
-                if (this.romLoaded.boot) {
-                    this.mainRAM[0xFFFE] = this.bootROM[0x1FE];
-                    this.mainRAM[0xFFFF] = this.bootROM[0x1FF];
-                }
-            }
         }
 
-        // Reset CPUs - they read their reset vectors
-        // On FM-7: Boot ROM at $FE00-$FFFF determines the reset vector
-        // On FM77AV: Initiator ROM at $FE00-$FFFF runs first
-        this.mainCPU.reset();
+        // Perform the FDC port initialization that Boot ROM's $FFC0 routine does:
+        // Clear FDC command registers and issue Force Interrupt ($40) to each port.
+        // This is equivalent to the _FDC_INIT routine in BOOT_BAS/BOOT_DOS.
+        this._initFDCPorts();
+
+        // Reset sub CPU — it reads its own reset vector from sub ROM
         this.subCPU.reset();
         this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
-
-        // Sub CPU is already set to running above; sync scheduler
         this.scheduler.setSubHalted(false);
 
-        // Log reset vector for debugging
-        const rvHi = this._mainRead(0xFFFE);
-        const rvLo = this._mainRead(0xFFFF);
-        const resetVec = (rvHi << 8) | rvLo;
-        console.log(`${this._machineType.toUpperCase()} reset (boot mode: ${bootMode})`);
-        console.log(`  Main CPU reset vector: $${resetVec.toString(16).toUpperCase().padStart(4, '0')}`);
-        console.log(`  Initiator: ${this._initiatorActive ? 'ACTIVE' : 'OFF'}, ROM loaded: ${this.romLoaded.initiate}`);
-        console.log(`  Sub monitor: Type-${['A','B','C'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
+        // Determine main CPU start address based on boot mode
+        let mainPC;
+        if (bootMode === 'dos') {
+            // DOS boot: read boot sectors from disk image directly into RAM,
+            // then start execution at the IPL entry point ($0300).
+            mainPC = this._dosBootBypass();
+        } else {
+            // BASIC boot: jump directly to F-BASIC cold start.
+            mainPC = this._basicBootBypass();
+        }
 
-        // Sub CPU reset vector
+        // On real hardware, the boot ROM's FDC operations take hundreds of
+        // thousands of CPU cycles. During this time the sub CPU completes its
+        // initialization and clears BUSY (via $D40A read). Our bypass loads
+        // sectors instantly (0 cycles), so the sub CPU hasn't had time to clear
+        // BUSY. Pre-clear it here to match the state the IPL code expects.
+        if (bootMode === 'dos') {
+            this._subBusy = false;
+        }
+
+        // Set main CPU initial state (DP=0, interrupts masked, PC=target)
+        this.mainCPU.reset();
+        this.mainCPU.pc = mainPC;
+        // Set reset vector in RAM to match (for consistency)
+        this.mainRAM[0xFFFE] = (mainPC >> 8) & 0xFF;
+        this.mainRAM[0xFFFF] = mainPC & 0xFF;
+
+        // Log boot info
+        console.log(`${this._machineType.toUpperCase()} reset (boot: ${bootMode}, bypass)`);
+        console.log(`  Main CPU PC: $${mainPC.toString(16).toUpperCase().padStart(4, '0')}`);
+        console.log(`  Initiator: BYPASSED, ROM loaded: ${this.romLoaded.initiate}`);
+        console.log(`  Sub monitor: Type-${['A','B','C'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
+        console.log(`  Disk in drive 0: ${hasDisk ? 'YES' : 'NO'}, F-BASIC ROM: ${this.romLoaded.fbasic ? 'YES' : 'NO'}`);
         const srvHi = this._subRead(0xFFFE);
         const srvLo = this._subRead(0xFFFF);
-        const subResetVec = (srvHi << 8) | srvLo;
-        console.log(`  Sub CPU reset vector: $${subResetVec.toString(16).toUpperCase().padStart(4, '0')}`);
+        console.log(`  Sub CPU reset vector: $${((srvHi << 8) | srvLo).toString(16).toUpperCase().padStart(4, '0')}`);
+    }
 
+    /**
+     * FDC port initialization — equivalent to Boot ROM's $FFC0 routine.
+     * Clears FDC command registers and issues Force Interrupt to each port.
+     */
+    _initFDCPorts() {
+        // The Boot ROM writes to $FD06/$FD07 (FDC aux) and $FD24-$FD2A
+        // (4 FDC sub-ports), issuing CLR + Force Interrupt ($40) to each.
+        // Our FDC.reset() already handles this, but we also clear the
+        // main CPU side I/O state for completeness.
+        this.fdc.reset();
+    }
+
+    /**
+     * BASIC boot bypass: determine F-BASIC cold start address.
+     * Reads the cold start vector from F-BASIC ROM at $FBFE-$FBFF.
+     * @returns {number} Start address for main CPU
+     */
+    _basicBootBypass() {
+        if (!this.romLoaded.fbasic) {
+            console.error('[BOOT] F-BASIC ROM not loaded — cannot BASIC boot');
+            return 0xFE00; // Fallback: try boot ROM if available
+        }
+        // F-BASIC ROM cold start vector at $FBFE-$FBFF
+        // (ROM mapped at $8000-$FBFF, so offset = $FBFE - $8000 = $7BFE)
+        const hi = this.fbasicROM[0x7BFE];
+        const lo = this.fbasicROM[0x7BFF];
+        const coldStart = (hi << 8) | lo;
+        console.log(`[BOOT] BASIC bypass: F-BASIC cold start = $${coldStart.toString(16).toUpperCase().padStart(4, '0')}`);
+        return coldStart;
+    }
+
+    /**
+     * DOS boot bypass: read boot sectors from disk image directly into RAM.
+     * Emulates what BOOT_DOS.ROM does via FDC:
+     *   1. Read Track 0, Side 0, Sector 1 (256B) → RAM $0300
+     *   2. Read Track 0, Side 0, Sector 2 (256B) → RAM $0400
+     *   3. Set up FDC state (drive 0, track 0)
+     *   4. Jump to $0300 (IPL entry point)
+     * @returns {number} Start address for main CPU
+     */
+    _dosBootBypass() {
+        const disk = this.fdc.disks[0];
+        if (!disk || !disk.loaded) {
+            console.error('[BOOT] No disk in drive 0 — falling back to BASIC');
+            return this._basicBootBypass();
+        }
+
+        // Boot ROM parameter tables specify:
+        //   Table 1: READ sector 1, Track 0, Side 0 → buffer $0300
+        //   Table 2: READ sector 2, Track 0, Side 0 → buffer $0400
+        const loadMap = [
+            { sector: 1, addr: 0x0300 },
+            { sector: 2, addr: 0x0400 },
+        ];
+
+        let sectorsLoaded = 0;
+        for (const { sector: sNum, addr } of loadMap) {
+            const sector = disk.getSector(0, 0, sNum);
+            if (!sector || !sector.data) {
+                console.warn(`[BOOT] Sector ${sNum} not found on Track 0 Side 0`);
+                continue;
+            }
+            for (let i = 0; i < sector.data.length; i++) {
+                this.mainRAM[addr + i] = sector.data[i];
+            }
+            sectorsLoaded++;
+            console.log(`[BOOT] DOS bypass: sector ${sNum} (${sector.data.length}B) → $${addr.toString(16).toUpperCase().padStart(4, '0')}`);
+        }
+
+        if (sectorsLoaded === 0) {
+            console.error('[BOOT] No boot sectors readable — falling back to BASIC');
+            return this._basicBootBypass();
+        }
+
+        // IPL code at $0300 may call back into Boot ROM FDC routines
+        // (e.g. JSR $FE08 for sector read). Install boot code into RAM
+        // so these callbacks work regardless of machine type or ROM set.
+        this._installBootROMtoRAM();
+
+        // Set up FDC state so IPL code can continue reading from disk.
+        // Emulate what Boot ROM does: select drive 0, RESTORE to track 0.
+        this._mainIOWrite(0xFD1D, 0x80);  // Drive 0, motor ON
+        this._mainIOWrite(0xFD1C, 0x00);  // Side 0
+        // Set FDC to post-RESTORE state: track 0, head engaged, ready.
+        this.fdc.trackReg = 0;
+        this.fdc.sectorReg = 1;
+        this.fdc.headPosition[0] = 0;
+        // STATUS.TRACK0 = 0x04, STATUS.HEAD_ENGAGED = 0x20
+        this.fdc.statusReg = 0x04 | 0x20;
+        this.fdc.state = 0; // FDC_STATE.IDLE
+
+        // DOS boot: BASIC ROM disabled (games use $8000-$FBFF as RAM)
+        this._basicRomEnabled = false;
+
+        // IPL entry point
+        return 0x0300;
+    }
+
+    /**
+     * Install Boot ROM code into mainRAM at $FE00-$FFDF.
+     * Required for FM77AV DOS boot: IPL code may call back into Boot ROM
+     * FDC routines (e.g. JSR $FE08). Since FM77AV reads $FE00 from mainRAM
+     * (Initiator ROM is disabled), the boot code must be present there.
+     *
+     * Source priority:
+     *   1. boot_dos.rom (standalone, always the same code)
+     *   2. INITIATE.ROM embedded DOS boot (offset $1A00, identical code)
+     */
+    _installBootROMtoRAM() {
+        // Code area only: $FE00-$FFDF (480 bytes). Vectors at $FFE0+ are
+        // already set up separately in reset().
+        const codeSize = 0x01E0; // 480 bytes
+
+        if (this.romLoaded.boot) {
+            // Use standalone boot_dos.rom
+            for (let i = 0; i < codeSize; i++) {
+                this.mainRAM[BOOT_ROM_BASE + i] = this.bootROM[i];
+            }
+            console.log('[BOOT] Installed boot_dos.rom code to RAM $FE00-$FFDF');
+        } else if (this.romLoaded.initiate && this._initiateROMSize >= 0x1BC4) {
+            // Use INITIATE.ROM embedded DOS boot (offset $1A00)
+            for (let i = 0; i < codeSize; i++) {
+                this.mainRAM[BOOT_ROM_BASE + i] = this.initiateROM[0x1A00 + i];
+            }
+            console.log('[BOOT] Installed INITIATE.ROM embedded DOS boot to RAM $FE00-$FFDF');
+        } else {
+            console.warn('[BOOT] No boot ROM code available — IPL FDC callbacks will fail');
+        }
     }
 
     // =========================================================================

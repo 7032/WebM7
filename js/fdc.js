@@ -795,7 +795,6 @@ export class FDC {
     _beginSeek() {
         const target = this.dataReg;
         const headPos = this.headPosition[this.currentDrive];
-
         // Use physical head position for comparison, not trackReg.
         // The BIOS may write 0 to trackReg before Seek (absolute positioning),
         // but the physical head is already at the correct track.
@@ -927,7 +926,6 @@ export class FDC {
             this._completeCommand(STATUS.RNF);
             return;
         }
-
         // Set up data transfer
         this.dataBuffer = sector.data;
         this.dataIndex = 0;

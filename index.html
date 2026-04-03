@@ -62,13 +62,7 @@
                     <label><input type="radio" name="machineType" value="fm77av"> FM77AV</label>
                 </div>
             </div>
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-                <label style="margin:0;">Boot:</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="bootMode" value="dos"> DOS</label>
-                    <label><input type="radio" name="bootMode" value="basic" checked> BASIC</label>
-                </div>
-            </div>
+            <!-- Boot mode is auto-detected: disk in drive 0 → DOS, else → BASIC -->
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
                 <label id="fmCardLabel" style="margin:0;"><input type="checkbox" id="fmCardCheck"> FM Sound Card</label>
                 <label style="margin:0;">Joystick:</label>
@@ -81,7 +75,12 @@
                 <label style="margin:0;"><input type="checkbox" id="cursorToNumpad"> Cursor → Numpad</label>
             </div>
             <div class="btn-row">
-                <button id="playStopBtn" class="btn-start">Power On</button>
+                <label class="power-switch" title="Power On / Off">
+                    <input type="checkbox" id="powerToggle">
+                    <span class="power-label-off">OFF</span>
+                    <span class="power-track"><span class="power-knob"></span></span>
+                    <span class="power-label-on">ON</span>
+                </label>
                 <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
                 <button id="screenshotBtn" style="font-size:10px;padding:2px 6px;" title="Save screenshot as PNG">📷</button>
@@ -122,11 +121,6 @@
             <!-- FM77AV additional ROMs (hidden by default) -->
             <div class="rom-list rom-list-av" id="romListAV" style="display:none;margin-top:6px;">
                 <label style="color:#e8a848;">FM77AV ROMs:</label>
-                <div class="rom-item">
-                    <span class="rom-name">INITIATE.ROM</span>
-                    <input type="file" id="romInitiate" accept=".rom,.ROM,.bin">
-                    <span class="status-tag" id="statusInitiate">--</span>
-                </div>
                 <div class="rom-item">
                     <span class="rom-name">SUBSYS_A.ROM</span>
                     <input type="file" id="romSubSysA" accept=".rom,.ROM,.bin">
@@ -334,7 +328,6 @@
         <table>
         <tr><th>ファイル名</th><th>内容</th></tr>
         <tr><td><code>SUBSYSCG.ROM</code></td><td>キャラクタージェネレータ ROM（FM77AV統合版）</td></tr>
-        <tr><td><code>INITIATE.ROM</code></td><td>イニシエータ ROM</td></tr>
         <tr><td><code>SUBSYS_A.ROM</code></td><td>サブシステム Type-A ROM</td></tr>
         <tr><td><code>SUBSYS_B.ROM</code></td><td>サブシステム Type-B ROM</td></tr>
         </table>
@@ -359,7 +352,7 @@
         <ol>
         <li><strong>Machine</strong> を選択（FM-7 / FM77AV）</li>
         <li><strong>Boot Mode</strong> を選択（DOS / BASIC）</li>
-        <li><strong>Power On</strong> ボタンを押す（実行中は Power Off に変わり停止可能。Pause で一時停止・Resume で再開）</li>
+        <li><strong>Power</strong> スイッチをONにスライド（OFF にスライドで停止。Pause で一時停止・Resume で再開）</li>
         </ol>
         <p>画面（Screen）をクリックするとキーボード入力がエミュレータに渡ります。</p>
 
@@ -383,7 +376,7 @@
         <h3>右側 — サイドパネル</h3>
         <table>
         <tr><th>セクション</th><th>内容</th></tr>
-        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、FM Sound Card（FM-7のみ）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Power On/Off、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
+        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、FM Sound Card（FM-7のみ）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Powerスライドスイッチ（ON/OFF）、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功。ROM Info で読み込み済みROMのサイズ・ハッシュを確認可能（Copy ボタンでクリップボードにコピー）</td></tr>
         <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
         <tr><td><strong>Tape Image</strong></td><td>T77 形式のテープイメージをセット。REW（巻き戻し）、Eject ボタン。CMT LED付き</td></tr>
@@ -509,6 +502,16 @@ SOFTWARE.</pre>
     </div>
 </div>
 
+<!-- ROM not loaded dialog -->
+<div class="modal-overlay" id="romMissingModal">
+    <div class="modal-content" style="max-width:420px;text-align:center;padding:32px 28px;">
+        <h1 style="margin-bottom:16px;">Need to set ROM</h1>
+        <p style="margin-bottom:4px;">ROMを設定してください</p>
+        <p id="romMissingList" style="color:#e8a848;font-size:0.9em;margin-bottom:20px;"></p>
+        <button id="romMissingClose" style="padding:10px 48px;font-size:1.1em;font-weight:bold;background:linear-gradient(180deg,#e8c840,#c8a020);color:#1a1a2e;border:none;border-radius:6px;cursor:pointer;font-family:inherit;letter-spacing:0.05em;">OK</button>
+    </div>
+</div>
+
 <script type="module">
 import { FM7, MACHINE_FM7, MACHINE_FM77AV } from './js/fm7.js';
 
@@ -529,7 +532,7 @@ const romBootDosInput = document.getElementById('romBootDos');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
 const diskFileInput   = document.getElementById('diskFile');
-const playStopBtn     = document.getElementById('playStopBtn');
+const powerToggle     = document.getElementById('powerToggle');
 const pauseBtn        = document.getElementById('pauseBtn');
 const resetBtn        = document.getElementById('resetBtn');
 const diskEjectBtn    = document.getElementById('diskEjectBtn');
@@ -571,11 +574,9 @@ const psgRegsEl       = document.getElementById('psgRegs');
 
 // FM77AV ROM elements
 const romListAV       = document.getElementById('romListAV');
-const romInitiateInput = document.getElementById('romInitiate');
 const romSubSysAInput  = document.getElementById('romSubSysA');
 const romSubSysBInput  = document.getElementById('romSubSysB');
 const romFBasicAVInput = document.getElementById('romFBasicAV');
-const statusInitiateEl = document.getElementById('statusInitiate');
 const statusSubSysAEl  = document.getElementById('statusSubSysA');
 const statusSubSysBEl  = document.getElementById('statusSubSysB');
 const statusFBasicAVEl = document.getElementById('statusFBasicAV');
@@ -614,10 +615,10 @@ document.querySelectorAll('input[name="machineType"]').forEach(radio => {
     });
 });
 
-// Lock control groups during VM run (machineType, bootMode, fmCard locked; joyPort stays live)
+// Lock control groups during VM run (machineType, fmCard locked; joyPort stays live)
 const _lockedRadioState = {};
 function setControlsLocked(locked) {
-    ['machineType', 'bootMode'].forEach(name => {
+    ['machineType'].forEach(name => {
         const group = document.querySelector(`input[name="${name}"]`).closest('.radio-group');
         group.classList.toggle('locked', locked);
         if (locked) {
@@ -627,14 +628,10 @@ function setControlsLocked(locked) {
     });
     // FM card checkbox: locked during run
     const fmCheck = document.getElementById('fmCardCheck');
-    if (locked) {
-        fmCheck.disabled = true;
-    } else {
-        fmCheck.disabled = false;
-    }
+    fmCheck.disabled = locked;
 }
 // Block radio changes during run by reverting to saved state
-['machineType', 'bootMode'].forEach(name => {
+['machineType'].forEach(name => {
     document.querySelectorAll(`input[name="${name}"]`).forEach(radio => {
         radio.addEventListener('click', (e) => {
             if (!fm7._running) return;
@@ -831,7 +828,6 @@ romFolderInput.addEventListener('change', async (e) => {
                 loaded++;
             } else if (name === 'initiate.rom') {
                 fm7.loadInitiateROM(data);
-                markLoaded(statusInitiateEl);
                 loaded++;
             } else if (name === 'subsys_a.rom') {
                 fm7.loadSubROM_A(data);
@@ -878,7 +874,6 @@ setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosE
 setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl);
 
 // FM77AV ROMs
-setupIndividualROM(romInitiateInput, (d) => fm7.loadInitiateROM(d), statusInitiateEl);
 setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysAEl);
 setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl);
 setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl);
@@ -1038,8 +1033,8 @@ function setEmuState(state) {
     emuState = state;
     switch (state) {
         case 'stopped':
-            playStopBtn.textContent = 'Power On';
-            playStopBtn.className = 'btn-start';
+            powerToggle.checked = false;
+
             pauseBtn.disabled = true;
             pauseBtn.textContent = 'Pause';
             resetBtn.disabled = true;
@@ -1048,8 +1043,8 @@ function setEmuState(state) {
             stateValEl.style.color = '#cc6666';
             break;
         case 'running':
-            playStopBtn.textContent = 'Power Off';
-            playStopBtn.className = 'btn-stop';
+            powerToggle.checked = true;
+
             pauseBtn.disabled = false;
             pauseBtn.textContent = 'Pause';
             resetBtn.disabled = false;
@@ -1058,8 +1053,8 @@ function setEmuState(state) {
             stateValEl.style.color = '#00cc66';
             break;
         case 'paused':
-            playStopBtn.textContent = 'Power Off';
-            playStopBtn.className = 'btn-stop';
+            powerToggle.checked = true;
+
             pauseBtn.disabled = false;
             pauseBtn.textContent = 'Resume';
             resetBtn.disabled = false;
@@ -1070,16 +1065,31 @@ function setEmuState(state) {
     }
 }
 
-// ▶/■ Play/Stop button
-playStopBtn.addEventListener('click', () => {
-    if (emuState === 'stopped') {
-        // Start: reset + run
+// Power toggle switch
+powerToggle.addEventListener('change', () => {
+    if (powerToggle.checked) {
+        // Check minimum ROM requirements before starting
         updateMachineType();
+        const hasDisk = fm7.fdc.disks[0] && fm7.fdc.disks[0].loaded;
+        const needBasic = !hasDisk;
+        const missing = [];
+        if (needBasic && !fm7.romLoaded.fbasic) missing.push('FBASIC30.ROM');
+        if (!fm7.romLoaded.sub) missing.push('SUBSYS_C.ROM');
+        if (fm7.isFM77AV && hasDisk) {
+            if (!fm7.romLoaded.subA) missing.push('SUBSYS_A.ROM');
+            if (!fm7.romLoaded.subB) missing.push('SUBSYS_B.ROM');
+        }
+        if (missing.length > 0) {
+            document.getElementById('romMissingList').textContent = missing.join(', ');
+            document.getElementById('romMissingModal').classList.add('open');
+            powerToggle.checked = false;
+            return;
+        }
+        // Start: reset + run
         fm7.setFMCard(document.getElementById('fmCardCheck').checked);
         const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
         fm7.setJoystickPort(joyPort);
-        const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
-        fm7.reset(bootMode);
+        fm7.reset();
         fm7.start(canvas);
         setEmuState('running');
     } else {
@@ -1124,8 +1134,7 @@ resetBtn.addEventListener('click', () => {
     fm7.setFMCard(document.getElementById('fmCardCheck').checked);
     const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
     fm7.setJoystickPort(joyPort);
-    const bootMode = document.querySelector('input[name="bootMode"]:checked').value;
-    fm7.reset(bootMode);
+    fm7.reset();
     fm7.start(canvas);
     setEmuState('running');
 });
@@ -1758,6 +1767,11 @@ document.getElementById('creditsCloseBottom').addEventListener('click', closeCre
 creditsModal.addEventListener('click', (e) => {
     if (e.target === creditsModal) closeCredits();
 });
+
+// ROM missing modal
+const romMissingModal = document.getElementById('romMissingModal');
+document.getElementById('romMissingClose').addEventListener('click', () => romMissingModal.classList.remove('open'));
+romMissingModal.addEventListener('click', (e) => { if (e.target === romMissingModal) romMissingModal.classList.remove('open'); });
 
 // =========================================================================
 // Copyright year

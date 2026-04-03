@@ -330,15 +330,107 @@ button {
     transition: all 0.15s;
 }
 
-button.btn-start {
-    background: #0a4a2a;
-    color: #00ee77;
-    border-color: #00cc66;
+/* Power toggle switch — slide switch with OFF [===O    ] ON style */
+.power-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
 }
 
-button.btn-start:hover {
-    background: #0c5a32;
-    box-shadow: 0 0 8px rgba(0, 204, 102, 0.3);
+.power-switch input { display: none; }
+
+/* OFF / ON labels beside the track */
+.power-label-off,
+.power-label-on {
+    font-size: 0.7em;
+    font-weight: bold;
+    line-height: 1;
+}
+
+.power-label-off { color: #cc6666; }
+.power-label-on  { color: #556655; }
+
+.power-switch input:checked ~ .power-label-off { color: #554444; }
+.power-switch input:checked ~ .power-label-on  { color: #00ee77; }
+
+/* Track (groove) */
+.power-track {
+    position: relative;
+    display: block;
+    width: 40px;
+    height: 20px;
+    background: linear-gradient(180deg, #111 0%, #222 40%, #1a1a1a 100%);
+    border: 2px solid #444;
+    border-radius: 4px;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8),
+                inset 0 -1px 1px rgba(255, 255, 255, 0.05);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Knob */
+.power-knob {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: linear-gradient(180deg, #bbb 0%, #888 40%, #999 100%);
+    border: 1px solid #aaa;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6),
+                inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    transition: left 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Knob grip lines */
+.power-knob::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    left: 5px;
+    width: 6px;
+    height: 8px;
+    background: repeating-linear-gradient(
+        180deg,
+        rgba(0, 0, 0, 0.25) 0px,
+        rgba(0, 0, 0, 0.25) 1px,
+        transparent 1px,
+        transparent 3px
+    );
+}
+
+/* Hover */
+.power-switch:hover .power-track {
+    border-color: #666;
+}
+
+/* === ON state === */
+.power-switch input:checked ~ .power-track {
+    border-color: #00aa55;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6),
+                0 0 6px rgba(0, 204, 102, 0.3);
+}
+
+.power-switch input:checked ~ .power-track .power-knob {
+    left: 21px;
+    background: linear-gradient(180deg, #55ffaa 0%, #00bb66 40%, #00dd77 100%);
+    border-color: #00ee77;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5),
+                0 0 8px rgba(0, 238, 119, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.power-switch input:checked ~ .power-track .power-knob::after {
+    background: repeating-linear-gradient(
+        180deg,
+        rgba(0, 0, 0, 0.2) 0px,
+        rgba(0, 0, 0, 0.2) 1px,
+        transparent 1px,
+        transparent 3px
+    );
 }
 
 button.btn-stop {
