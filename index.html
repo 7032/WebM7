@@ -103,11 +103,6 @@
                     <span class="status-tag" id="statusFBasic">--</span>
                 </div>
                 <div class="rom-item">
-                    <span class="rom-name">BOOT_BAS.ROM</span>
-                    <input type="file" id="romBootBas" accept=".rom,.ROM,.bin">
-                    <span class="status-tag" id="statusBootBas">--</span>
-                </div>
-                <div class="rom-item">
                     <span class="rom-name">BOOT_DOS.ROM</span>
                     <input type="file" id="romBootDos" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusBootDos">--</span>
@@ -135,11 +130,6 @@
                     <span class="rom-name">SUBSYSCG.ROM</span>
                     <input type="file" id="romCG" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusCG">--</span>
-                </div>
-                <div class="rom-item">
-                    <span class="rom-name">FBASIC30.ROM</span>
-                    <input type="file" id="romFBasicAV" accept=".rom,.ROM,.bin">
-                    <span class="status-tag" id="statusFBasicAV">--</span>
                 </div>
             </div>
             <div id="romInfoPanel" style="margin-top:6px;font-size:10px;color:#aaa;display:none;">
@@ -527,7 +517,7 @@ const screenContainer = document.getElementById('screenContainer');
 // UI elements
 const romFolderInput  = document.getElementById('romFolder');
 const romFBasicInput  = document.getElementById('romFBasic');
-const romBootBasInput = document.getElementById('romBootBas');
+// romBootBas removed (Boot ROM bypass)
 const romBootDosInput = document.getElementById('romBootDos');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
@@ -540,7 +530,7 @@ const tapeEjectBtn    = document.getElementById('tapeEjectBtn');
 
 const romStatusEl     = document.getElementById('romStatus');
 const statusFBasicEl  = document.getElementById('statusFBasic');
-const statusBootBasEl = document.getElementById('statusBootBas');
+// statusBootBas removed (Boot ROM bypass)
 const statusBootDosEl = document.getElementById('statusBootDos');
 const statusSubSysEl  = document.getElementById('statusSubSys');
 const statusCGEl      = document.getElementById('statusCG');
@@ -576,10 +566,10 @@ const psgRegsEl       = document.getElementById('psgRegs');
 const romListAV       = document.getElementById('romListAV');
 const romSubSysAInput  = document.getElementById('romSubSysA');
 const romSubSysBInput  = document.getElementById('romSubSysB');
-const romFBasicAVInput = document.getElementById('romFBasicAV');
+// romFBasicAV removed (duplicate of common FBASIC30)
 const statusSubSysAEl  = document.getElementById('statusSubSysA');
 const statusSubSysBEl  = document.getElementById('statusSubSysB');
-const statusFBasicAVEl = document.getElementById('statusFBasicAV');
+// statusFBasicAV removed (duplicate of common FBASIC30)
 const siteTitle        = document.getElementById('siteTitle');
 
 // =========================================================================
@@ -808,7 +798,6 @@ romFolderInput.addEventListener('change', async (e) => {
             if (name === 'fbasic30.rom') {
                 fm7.loadFBasicROM(data);
                 markLoaded(statusFBasicEl);
-                markLoaded(statusFBasicAVEl);
                 loaded++;
             } else if (name === 'boot_dos.rom') {
                 fm7.loadBootROM(data);
@@ -816,7 +805,6 @@ romFolderInput.addEventListener('change', async (e) => {
                 loaded++;
             } else if (name === 'boot_bas.rom') {
                 fm7.loadBootBasROM(data);
-                markLoaded(statusBootBasEl);
                 loaded++;
             } else if (name === 'subsys_c.rom') {
                 fm7.loadSubROM(data);
@@ -869,7 +857,6 @@ function setupIndividualROM(input, loaderFn, statusEl) {
 }
 
 setupIndividualROM(romFBasicInput,  (d) => fm7.loadFBasicROM(d),  statusFBasicEl);
-setupIndividualROM(romBootBasInput, (d) => fm7.loadBootBasROM(d), statusBootBasEl);
 setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosEl);
 setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl);
 
@@ -877,7 +864,6 @@ setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl
 setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysAEl);
 setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl);
 setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl);
-setupIndividualROM(romFBasicAVInput, (d) => fm7.loadFBasicROM(d),  statusFBasicAVEl);
 
 // =========================================================================
 // ROM Info Display (MD5, size, model detection)
