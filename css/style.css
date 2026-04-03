@@ -135,8 +135,8 @@ input[type="range"]#volumeSlider {
 
 /* ===== Right Column: Side Panel ===== */
 .side-panel {
-    width: 280px;
-    min-width: 280px;
+    width: 320px;
+    min-width: 320px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -173,7 +173,7 @@ input[type="range"]#volumeSlider {
 }
 
 .sp-section label {
-    display: block;
+    display: inline-flex;
     font-size: 0.75em;
     color: #8899aa;
     margin-bottom: 3px;
@@ -312,18 +312,31 @@ input[type="radio"] { accent-color: #00cc66; }
 .radio-group.locked label { color: #6688aa; cursor: not-allowed; }
 .radio-group.locked input[type="radio"] { pointer-events: none; }
 
+/* Control rows */
+.ctrl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+    white-space: nowrap;
+}
+.ctrl-row > label:first-child {
+    margin: 0;
+}
+
 /* Buttons */
 .btn-row {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+    flex-wrap: nowrap;
+    gap: 4px;
     margin-top: 4px;
+    align-items: center;
 }
 
 button {
     font-family: inherit;
-    font-size: 0.8em;
-    padding: 4px 12px;
+    font-size: 0.75em;
+    padding: 3px 10px;
     border: 1px solid #4a5a7a;
     border-radius: 4px;
     cursor: pointer;
@@ -447,6 +460,17 @@ button.btn-reset {
     background: #3a3a1a;
     color: #cccc66;
     border-color: #aaaa44;
+}
+
+button.btn-screenshot {
+    background: #111;
+    border-color: #aaa;
+    font-size: 0.85em;
+    padding: 2px 6px;
+}
+button.btn-screenshot:hover {
+    background: #222;
+    border-color: #ccc;
 }
 
 button.btn-reset:hover {

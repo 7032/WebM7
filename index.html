@@ -55,25 +55,6 @@
         <!-- Control -->
         <div class="sp-section">
             <h3>Control</h3>
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-                <label style="margin:0;">Machine:</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="machineType" value="fm7" checked> FM-7</label>
-                    <label><input type="radio" name="machineType" value="fm77av"> FM77AV</label>
-                </div>
-            </div>
-            <!-- Boot mode is auto-detected: disk in drive 0 → DOS, else → BASIC -->
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-                <label id="fmCardLabel" style="margin:0;"><input type="checkbox" id="fmCardCheck"> FM Sound Card</label>
-                <label style="margin:0;">Joystick:</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="joyPort" value="0" checked> Port 1</label>
-                    <label><input type="radio" name="joyPort" value="1"> Port 2</label>
-                </div>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-                <label style="margin:0;"><input type="checkbox" id="cursorToNumpad"> Cursor → Numpad</label>
-            </div>
             <div class="btn-row">
                 <label class="power-switch" title="Power On / Off">
                     <input type="checkbox" id="powerToggle">
@@ -83,7 +64,33 @@
                 </label>
                 <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
-                <button id="screenshotBtn" style="font-size:10px;padding:2px 6px;" title="Save screenshot as PNG">📷</button>
+                <button id="screenshotBtn" class="btn-screenshot" title="Save screenshot as PNG">📷</button>
+            </div>
+            <br/>
+            <hr size="1">
+            <br/>
+            <div class="ctrl-row">
+                <label>Machine:</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="machineType" value="fm7" checked> FM-7</label>
+                    <label><input type="radio" name="machineType" value="fm77av"> FM77AV</label>
+                </div>
+            </div>
+            <!-- Boot mode is auto-detected: disk in drive 0 → DOS, else → BASIC -->
+            <div class="ctrl-row" id="fmCardRow">
+                <label>FM Sound Card</label>
+                <input type="checkbox" id="fmCardCheck">
+            </div>
+            <div class="ctrl-row">
+                <label>Joystick:</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="joyPort" value="0" checked> Port 1</label>
+                    <label><input type="radio" name="joyPort" value="1"> Port 2</label>
+                </div>
+            </div>
+            <div class="ctrl-row">
+                <label>Cursor → Ten Key</label>
+                <input type="checkbox" id="cursorToNumpad">
             </div>
         </div>
 
@@ -145,9 +152,15 @@
             <h3>Disk Image</h3>
             <label>Drive 0:</label>
             <div style="display:flex;align-items:center;gap:4px;">
-                <input type="file" id="diskFile" accept=".d77,.D77,.2d,.2D">
-                <button id="diskEjectBtn" style="font-size:10px;padding:1px 6px;">Eject</button>
-                <span class="status-tag" id="diskStatus">--</span>
+                <input type="file" id="diskFile0" accept=".d77,.D77,.2d,.2D">
+                <button id="diskEjectBtn0" style="font-size:10px;padding:1px 6px;">Eject</button>
+                <span class="status-tag" id="diskStatus0">--</span>
+            </div>
+            <label>Drive 1:</label>
+            <div style="display:flex;align-items:center;gap:4px;">
+                <input type="file" id="diskFile1" accept=".d77,.D77,.2d,.2D">
+                <button id="diskEjectBtn1" style="font-size:10px;padding:1px 6px;">Eject</button>
+                <span class="status-tag" id="diskStatus1">--</span>
             </div>
             <div class="fdc-indicator" style="display:flex;align-items:center;gap:8px;margin-top:6px;">
                 <div style="display:flex;align-items:center;gap:4px;">
@@ -520,11 +533,13 @@ const romFBasicInput  = document.getElementById('romFBasic');
 const romBootDosInput = document.getElementById('romBootDos');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
-const diskFileInput   = document.getElementById('diskFile');
+const diskFileInput0  = document.getElementById('diskFile0');
+const diskFileInput1  = document.getElementById('diskFile1');
 const powerToggle     = document.getElementById('powerToggle');
 const pauseBtn        = document.getElementById('pauseBtn');
 const resetBtn        = document.getElementById('resetBtn');
-const diskEjectBtn    = document.getElementById('diskEjectBtn');
+const diskEjectBtn0   = document.getElementById('diskEjectBtn0');
+const diskEjectBtn1   = document.getElementById('diskEjectBtn1');
 const tapeEjectBtn    = document.getElementById('tapeEjectBtn');
 
 const romStatusEl     = document.getElementById('romStatus');
@@ -533,7 +548,8 @@ const statusFBasicEl  = document.getElementById('statusFBasic');
 const statusBootDosEl = document.getElementById('statusBootDos');
 const statusSubSysEl  = document.getElementById('statusSubSys');
 const statusCGEl      = document.getElementById('statusCG');
-const diskStatusEl    = document.getElementById('diskStatus');
+const diskStatusEl0   = document.getElementById('diskStatus0');
+const diskStatusEl1   = document.getElementById('diskStatus1');
 const tapeFileEl      = document.getElementById('tapeFile');
 const tapeStatusEl    = document.getElementById('tapeStatus');
 const cmtLed          = document.getElementById('cmtLed');
@@ -587,7 +603,7 @@ function updateMachineType() {
     romListAV.style.display = isAV ? '' : 'none';
     debugAV.style.display = isAV ? '' : 'none';
     // FM sound card option: FM-7 only (FM77AV has OPN built-in)
-    document.getElementById('fmCardLabel').style.display = isAV ? 'none' : '';
+    document.getElementById('fmCardRow').style.display = isAV ? 'none' : '';
 
     // Update title
     if (isAV) {
@@ -961,23 +977,27 @@ function markLoaded(el) {
 // Disk Loading
 // =========================================================================
 
-diskFileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-        const data = await file.arrayBuffer();
-        const ok = fm7.loadDisk(0, data);
-        if (ok) {
-            diskStatusEl.textContent = file.name;
-            diskStatusEl.classList.add('loaded');
-        } else {
-            diskStatusEl.textContent = 'Fail';
+function setupDiskInput(fileInput, statusEl, driveNum) {
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+            const data = await file.arrayBuffer();
+            const ok = fm7.loadDisk(driveNum, data);
+            if (ok) {
+                statusEl.textContent = file.name;
+                statusEl.classList.add('loaded');
+            } else {
+                statusEl.textContent = 'Fail';
+            }
+        } catch (err) {
+            statusEl.textContent = 'Err';
+            console.error(`Failed to load disk (drive ${driveNum}):`, err);
         }
-    } catch (err) {
-        diskStatusEl.textContent = 'Err';
-        console.error('Failed to load disk:', err);
-    }
-});
+    });
+}
+setupDiskInput(diskFileInput0, diskStatusEl0, 0);
+setupDiskInput(diskFileInput1, diskStatusEl1, 1);
 
 // =========================================================================
 // Tape Loading
@@ -1096,12 +1116,16 @@ pauseBtn.addEventListener('click', () => {
 });
 
 // Disk eject
-diskEjectBtn.addEventListener('click', () => {
-    fm7.fdc.ejectDisk(0);
-    diskFileInput.value = '';
-    diskStatus.textContent = '--';
-    diskStatus.style.color = '';
-});
+function setupDiskEject(btn, fileInput, statusEl, driveNum) {
+    btn.addEventListener('click', () => {
+        fm7.fdc.ejectDisk(driveNum);
+        fileInput.value = '';
+        statusEl.textContent = '--';
+        statusEl.classList.remove('loaded');
+    });
+}
+setupDiskEject(diskEjectBtn0, diskFileInput0, diskStatusEl0, 0);
+setupDiskEject(diskEjectBtn1, diskFileInput1, diskStatusEl1, 1);
 
 // Tape eject
 tapeEjectBtn.addEventListener('click', () => {
