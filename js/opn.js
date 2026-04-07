@@ -1454,6 +1454,8 @@ export class OPN {
                 while (this._timerACount >= periodA) {
                     this._timerACount -= periodA;
                     if (this._timerAIRQ) this._status |= 0x01;
+                    // CSM mode: Timer A overflow triggers key-on for FM ch3
+                    this._handleCSMTrigger();
                     // Reload: apply any pending timer value change
                     this._timerAPeriod = 72 * (1024 - this._timerA);
                 }

@@ -360,6 +360,9 @@ export class FDC {
         this._pendingDrq = false;
         this._drqTimer = 0;
 
+        // D77 sector status (CRC errors etc.) for READ completion
+        this._readStatusExtra = 0;
+
         // Callback for IRQ generation
         this.onIRQ = null;
 
@@ -478,10 +481,13 @@ export class FDC {
                 return this.currentSide | 0xFE;
 
             case 0xFD1D: // Drive select readback
-                return 0;
+                return (this.currentDrive & 0x03) | (this.motorOn ? 0x80 : 0x00);
 
-            case 0xFD1F: // DRQ/IRQ status (lower 6 bits always 1)
-                return (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00) | 0x3F;
+            case 0xFD1F: // DRQ/IRQ status
+                // bit 7: DRQ (data request)
+                // bit 6: IRQ (command complete)
+                // bits 0-5: unused (read as 0)
+                return (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00);
 
             default:
                 return 0xFF;
@@ -642,7 +648,6 @@ export class FDC {
 
         // If busy, ignore new commands (except Force Interrupt above)
         if (this.statusReg & STATUS.BUSY) {
-            console.warn(`FDC: cmd $${cmd.toString(16)} ignored (busy), state=${this.state} track=${this.trackReg}`);
             return;
         }
 
@@ -916,13 +921,18 @@ export class FDC {
             return;
         }
 
-        const track = this.headPosition[this.currentDrive];
+        // Real WD279x scans address fields on the CURRENT physical track for
+        // a sector header whose track-ID matches the track register. If the
+        // game forgot to seek (or seeks elsewhere) the read returns RNF on
+        // real hardware. Looking up by `headPosition` only would silently
+        // return data from the wrong physical track and corrupt the load.
+        const physTrack = this.headPosition[this.currentDrive];
         const side = this.currentSide;
         const sectorNum = this.sectorReg;
 
-        const sector = disk.getSector(track, side, sectorNum);
-        if (!sector) {
-            // Record Not Found
+        const sector = disk.getSector(physTrack, side, sectorNum);
+        if (!sector || sector.c !== this.trackReg) {
+            // Record Not Found (no sector ID matches trackReg on physical track)
             this._completeCommand(STATUS.RNF);
             return;
         }
@@ -931,12 +941,18 @@ export class FDC {
         this.dataIndex = 0;
         this.dataLength = sector.size;
 
-
-        // Check deleted data mark
+        // Check deleted data mark and D77 sector status
         let statusExtra = 0;
         if (sector.deleted) {
             statusExtra |= STATUS.RECORD_TYPE;
         }
+        // D77 status field: reflect CRC errors to FDC status
+        // (e.g., copy-protected sectors with intentional CRC errors)
+        if (sector.status & 0x08) {
+            statusExtra |= STATUS.CRC_ERROR;
+        }
+        // Save completion status for when transfer finishes
+        this._readStatusExtra = statusExtra;
 
         // Present first byte via pending DRQ (byte transfer timing)
         this.dataReg = this.dataBuffer[0];
@@ -986,8 +1002,8 @@ export class FDC {
                 // No more sectors: Record Not Found ends multi-sector
                 this._completeCommand(STATUS.RNF);
             } else {
-                // Single sector: done
-                this._completeCommand(0);
+                // Single sector: done (include D77 sector status like CRC errors)
+                this._completeCommand(this._readStatusExtra || 0);
             }
         }
     }
@@ -1160,6 +1176,7 @@ export class FDC {
         this.statusReg = errorBits & ~STATUS.BUSY; // Clear BUSY, set error bits
         this.drqFlag = false;
         this.state = FDC_STATE.IDLE;
+        // errorBits logged only in debug mode (removed for performance)
 
         // Assert IRQ
         this.irqFlag = true;

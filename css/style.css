@@ -172,6 +172,33 @@ input[type="range"]#volumeSlider {
     border-bottom: 1px solid #2a2a4a;
 }
 
+/* Collapsible section header */
+.sp-section h3.sp-section-toggle {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    padding-right: 16px;
+}
+.sp-section h3.sp-section-toggle::after {
+    content: '▼';
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.7em;
+    color: #6a8eb8;
+    transition: transform 0.15s ease;
+}
+.sp-section.collapsed h3.sp-section-toggle::after {
+    transform: translateY(-50%) rotate(-90deg);
+}
+.sp-section.collapsed > *:not(h3) {
+    display: none !important;
+}
+.sp-section.collapsed {
+    margin-bottom: 0;
+}
+
 .sp-section label {
     display: inline-flex;
     font-size: 0.75em;

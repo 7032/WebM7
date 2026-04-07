@@ -114,6 +114,11 @@ export class FM7 {
         this.subROM_A    = new Uint8Array(0x2800);    // Sub-system Type-A ROM (up to 10KB: $D800-$FFFF)
         this.subROM_B    = new Uint8Array(0x2800);    // Sub-system Type-B ROM (up to 10KB: $D800-$FFFF)
 
+        // --- Kanji ROM (128KB level 1, accessed via $FD20-$FD23) ---
+        this.kanjiROM   = new Uint8Array(0x20000);    // 128KB, initialized to 0xFF
+        this.kanjiROM.fill(0xFF);
+        this._kanjiAddr = 0;                           // 16-bit kanji ROM address register
+
         // --- ROM loaded flags ---
         this.romLoaded = {
             fbasic: false,
@@ -125,6 +130,7 @@ export class FM7 {
             initiate: false,
             subA: false,
             subB: false,
+            kanji: false,
         };
 
         // --- I/O state ---
@@ -132,6 +138,7 @@ export class FM7 {
         this._subHaltRequest = false; // Deferred HALT request (applied after sub CPU instruction)
         this._subCancelRequest = false; // Deferred CANCEL request
         this._subBusy     = true;   // Sub CPU BUSY flag (set on reset, cleared by sub CPU reading $D40A)
+        this._subBusyWasCleared = false; // One-shot: sub CPU cleared BUSY via $D40A read
         this._subCancel   = false;  // Sub CPU CANCEL flag
         this._subAttn     = false;  // Sub CPU attention flag (FIRQ to main CPU)
         this._breakKey    = false;  // BREAK key state (directly read via $FD04 bit1)
@@ -193,6 +200,8 @@ export class FM7 {
         this._timerIRQ    = false;  // Timer IRQ pending (cleared by reading $FD03)
         this._opnIrqLatch = false;  // OPN timer IRQ latch (edge-triggered, cleared by $FD03 read)
         this._opnIrqPrev  = false;  // Previous OPN IRQ state for edge detection
+        this._fdcIrqLatch = false;  // FDC IRQ latch (edge-triggered, cleared by reading $FD18)
+        this._fdcIrqPrev  = false;  // Previous FDC IRQ state for edge detection
         this._irqMaskReg  = 0;      // $FD02 keyboard IRQ mask (bit 0)
 
         // Emulation loop state
@@ -234,14 +243,20 @@ export class FM7 {
 
         // FM77AV: Initiator ROM overlay takes priority over MMR.
         // When active, $6000-$7FFF always reads from Initiator ROM.
-        if (this.isFM77AV && this._initiatorActive && this.romLoaded.initiate
-            && addr >= 0x6000 && addr < 0x8000) {
-            return this.initiateROM[addr - 0x6000];
+        // The upper 512 bytes of the 8KB ROM ($1E00-$1FFF) are also mirrored
+        // at $FE00-$FFFF so the reset vector resolves to the initiator entry.
+        if (this.isFM77AV && this._initiatorActive && this.romLoaded.initiate) {
+            if (addr >= 0x6000 && addr < 0x8000) {
+                return this.initiateROM[addr - 0x6000];
+            }
+            if (addr >= 0xFE00 && addr <= 0xFFFF) {
+                return this.initiateROM[(addr - 0xFE00) + 0x1E00];
+            }
         }
 
         // FM77AV MMR: remap through segment table
-        // MMR applies to $0000-$FC7F only; shared RAM ($FC80+) and I/O ($FD00+) bypass MMR
-        if (this._mmrEnabled && addr < SHARED_RAM_BASE) {
+        // MMR applies to $0000-$FBFF only; $FC00+ (RAM/shared/I/O) bypasses MMR
+        if (this._mmrEnabled && addr < 0xFC00) {
             const seg = addr >> 12;  // 4KB segment number (0-15)
             const bankOff = this._mmrBankReg * MMR_NUM_SEGMENTS;
             const physPage = this._mmrRegs[bankOff + seg];
@@ -339,8 +354,8 @@ export class FM7 {
         val &= 0xFF;
 
         // FM77AV MMR: remap writes through segment table
-        // MMR applies to $0000-$FC7F only; shared RAM ($FC80+) and I/O ($FD00+) bypass MMR
-        if (this._mmrEnabled && addr < SHARED_RAM_BASE) {
+        // MMR applies to $0000-$FBFF only; $FC00+ (RAM/shared/I/O) bypasses MMR
+        if (this._mmrEnabled && addr < 0xFC00) {
             const seg = addr >> 12;
             const bankOff = this._mmrBankReg * MMR_NUM_SEGMENTS;
             const physPage = this._mmrRegs[bankOff + seg];
@@ -449,7 +464,15 @@ export class FM7 {
 
         // $FD04: Sub CPU status (BUSY, attention, break key)
         if (addr === FD04_IRQ_MASK) {
-            let ret = this._subBusy ? 0xFF : 0x7F;  // bit 7 = BUSY only
+            // When sub CPU is halted, report BUSY=false regardless of
+            // the _subBusy latch.  The sub CPU is stopped and not
+            // processing — the main CPU should be free to write shared
+            // RAM.  _subHaltAck sets _subBusy=true on HALT for
+            // compatibility (some code may briefly read $FD04 right
+            // after writing $FD05 HALT in the same instruction flow),
+            // but the authoritative answer when halted is "not busy".
+            const busy = this._subHalted ? false : this._subBusy;
+            let ret = busy ? 0xFF : 0x7F;  // bit 7 = BUSY only
             if (this._subAttn) {
                 ret &= ~0x01;  // bit 0 = attention (active low)
                 this._subAttn = false;  // Clear attention on read
@@ -465,7 +488,21 @@ export class FM7 {
 
         // Sub CPU status ($FD05 read)
         // bit 7 = BUSY. bit 0 = EXTDET.
+        // On real hardware both CPUs run in parallel, so the sub CPU's
+        // $D40A read (BUSY clear) is immediately visible to the main CPU.
+        // In our interleaved scheduler, the sub CPU clears BUSY during
+        // catch-up which happens AFTER the main CPU's instruction.
+        // This can cause the main CPU to permanently miss BUSY=0 windows
+        // when an IRQ handler rapidly re-asserts HALT (re-setting BUSY).
+        // Compensate: if the sub CPU cleared BUSY via $D40A read but a
+        // subsequent HALT re-set it before the main CPU could observe it,
+        // report BUSY=0 once. The one-shot flag is consumed on read.
         if (addr === FD05_SUB_CTRL) {
+            if (this._subBusy && !this._subHalted && this._subBusyWasCleared) {
+                this._subBusyWasCleared = false;
+                return 0x7E; // BUSY=false (sub CPU recently cleared it)
+            }
+            this._subBusyWasCleared = false;
             return this._subBusy ? 0xFE : 0x7E;
         }
 
@@ -523,6 +560,8 @@ export class FM7 {
 
         // FDC registers ($FD18-$FD1F)
         if (addr >= FDC_IO_BASE && addr <= FDC_IO_END) {
+            // Reading $FD18 (status) clears the FDC IRQ latch
+            if (addr === FDC_IO_BASE) this._fdcIrqLatch = false;
             return this.fdc.readIO(addr);
         }
 
@@ -561,7 +600,15 @@ export class FM7 {
         // $FD06/$FD07: RS-232C USART (not installed: return open bus)
         if (addr === 0xFD06 || addr === 0xFD07) return 0xFF;
 
-        // $FD20-$FD2F: Kanji ROM ($FD20-$FD23, $FD2C-$FD2F) + reserved ($FD24-$FD2B)
+        // $FD20/$FD21: Kanji ROM address register (write-only, read returns 0xFF)
+        // $FD22/$FD23: Kanji ROM data (level 1)
+        //   $FD22 = ROM[kanji_addr*2 + 0] (left half byte of current row)
+        //   $FD23 = ROM[kanji_addr*2 + 1] (right half byte of current row)
+        // $FD2C-$FD2F: Kanji ROM level 2 (日本語カード, not implemented)
+        if (addr === 0xFD22 || addr === 0xFD23) {
+            const offset = (this._kanjiAddr << 1) + (addr & 1);
+            return this.kanjiROM[offset & 0x1FFFF];
+        }
         if (addr >= 0xFD20 && addr <= 0xFD2F) return 0xFF;
 
         // $FD08-$FD0C: Printer/timer I/O (stub)
@@ -629,7 +676,7 @@ export class FM7 {
         }
 
         // $FD02: IRQ mask register (write)
-        // Bit 0: key IRQ mask, Bit 2: timer IRQ mask (0=enabled, 1=masked)
+        // Bit 0: key IRQ enable (1=enable), Bit 2: timer IRQ enable (1=enable)
         if (addr === FD02_KEY_IRQ_MASK) {
             this._irqMaskReg = val;
             this.keyboard.writeIO(addr, val);
@@ -692,6 +739,11 @@ export class FM7 {
                 // tape software expect Type-C sub-system behavior.
                 if (this._bootMode === 'basic') {
                     this._mainIOWrite(FD13_SUB_BANK, SUB_MONITOR_C);
+                    // Re-apply BASIC boot keyboard mode (the FD13 handler
+                    // unconditionally sets scan-code mode, but BASIC needs
+                    // ASCII mode to type at the F-BASIC prompt).
+                    this.keyboard._enableBreakCodes = false;
+                    this.keyboard._useScanCodes = false;
                 }
                 console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
             }
@@ -722,9 +774,22 @@ export class FM7 {
             this.display.resetALU();
             this.display.resetPalette();
             this.display.multiPage = 0;
+            // Un-rotate any applied physical scroll before resetting offsets
+            // (apply vram_scroll(-crtc_offset[i]) for both pages)
+            const savedActive = this.display.activeVramPage;
+            for (let p = 0; p < 2; p++) {
+                if (this.display.crtcOffset[p] !== 0) {
+                    this.display.activeVramPage = p;
+                    this.display._vramScroll((-this.display.crtcOffset[p]) & 0xFFFF);
+                }
+            }
+            this.display.activeVramPage = savedActive;
             this.display.vramOffset[0] = 0;
             this.display.vramOffset[1] = 0;
-            this.display._scrollApplied = [0, 0];
+            this.display.crtcOffset[0] = 0;
+            this.display.crtcOffset[1] = 0;
+            this.display._vramOffsetCount[0] = 0;
+            this.display._vramOffsetCount[1] = 0;
             this.display.vramOffsetFlag = false;
             this.display.crtOn = false;
             this.display.vramaFlag = false;
@@ -743,8 +808,12 @@ export class FM7 {
             // conversion, so the keyboard sends scan codes. Type-C ROM
             // expects pre-converted ASCII codes (FM-7 compatible).
             if (bank === SUB_MONITOR_C) {
-                this.keyboard._useScanCodes = false;
-                this.keyboard._enableBreakCodes = false;
+                // FM77AV games that switch to Type-C for 640x200/320x200
+                // still use scan codes + break codes for input (the keyboard
+                // encoder hardware doesn't change with the sub ROM bank).
+                // Only F-BASIC BASIC boot genuinely needs ASCII mode.
+                this.keyboard._useScanCodes = true;
+                this.keyboard._enableBreakCodes = true;
             } else {
                 this.keyboard._useScanCodes = true;
                 this.keyboard._enableBreakCodes = true;
@@ -782,6 +851,7 @@ export class FM7 {
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
                 this._analogPalette[idx] = (cur & 0x0FF) | ((val & 0x0F) << 8);
+                this.display._pushScrollTrace('PAL_B', { idx, val: val & 0x0F });
                 return;
             }
             if (addr === FD33_APAL_RED) {
@@ -789,6 +859,7 @@ export class FM7 {
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
                 this._analogPalette[idx] = (cur & 0xF0F) | ((val & 0x0F) << 4);
+                this.display._pushScrollTrace('PAL_R', { idx, val: val & 0x0F });
                 return;
             }
             // $FD34: Green data for current palette entry
@@ -796,6 +867,7 @@ export class FM7 {
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
                 this._analogPalette[idx] = (cur & 0xFF0) | (val & 0x0F);
+                this.display._pushScrollTrace('PAL_G', { idx, val: val & 0x0F });
                 return;
             }
         }
@@ -806,6 +878,7 @@ export class FM7 {
             if (this.display.multiPage !== val) {
                 this.display.multiPage = val;
                 this.display._fullDirty = true;
+                this.display._pushScrollTrace('FD37', { val });
             }
             return;
         }
@@ -891,7 +964,18 @@ export class FM7 {
         // $FD06/$FD07: RS-232C USART write (stub: no device)
         if (addr === 0xFD06 || addr === 0xFD07) return;
 
-        // $FD20-$FD2F: Kanji ROM ($FD20-$FD23, $FD2C-$FD2F) + reserved ($FD24-$FD2B)
+        // $FD20: Kanji ROM address high byte write
+        // $FD21: Kanji ROM address low byte write
+        // $FD22/$FD23: data (read-only, writes ignored)
+        // $FD2C-$FD2F: level 2 (not implemented)
+        if (addr === 0xFD20) {
+            this._kanjiAddr = (this._kanjiAddr & 0x00FF) | (val << 8);
+            return;
+        }
+        if (addr === 0xFD21) {
+            this._kanjiAddr = (this._kanjiAddr & 0xFF00) | val;
+            return;
+        }
         if (addr >= 0xFD20 && addr <= 0xFD2F) return;
 
         // $FDFD-$FDFF: Boot mode / extended registers (stub)
@@ -996,6 +1080,7 @@ export class FM7 {
             } else if (result.sideEffect === 'busyOff') {
                 // $D40A: Clear BUSY flag
                 this._subBusy = false;
+                this._subBusyWasCleared = true;
             }
 
             return result.value;
@@ -1181,6 +1266,9 @@ export class FM7 {
             // bit 2: extended VRAM offset flag
             // bit 1-0: CG ROM bank
             if (addr === 0xD430) {
+                // Trace raw $D430 write before applying side-effects
+                this.display._pushScrollTrace('D430', { val });
+
                 // NMI mask (bit 7)
                 this._nmiMaskSub = (val & 0x80) !== 0;
                 if (this._nmiMaskSub) {
@@ -1358,17 +1446,19 @@ export class FM7 {
     /** Check all IRQ/FIRQ sources and assert on CPUs */
     _checkAndAssertInterrupts() {
         // Main CPU IRQ: timer, keyboard, FDC, OPN timers
-        // FM-7 IRQ is level-triggered: asserted as long as source is active
+        // 6809 IRQ is level-triggered: asserted while source is active,
+        // de-asserted when all sources go inactive.
         let mainIrq = false;
 
-        // Timer IRQ: $FD02 bit2 (1=enable)
+        // Timer IRQ: $FD02 bit2 (1=enable, 0=mask)
         if (this._timerIRQ && (this._irqMaskReg & 0x04)) mainIrq = true;
 
         // Keyboard IRQ: use keyboard module's actual state (handles its own mask)
         if (this.keyboard.isIRQActive()) mainIrq = true;
 
-        // FDC IRQ: check FDC's own flag directly (cleared by reading $FD18)
-        if (this.fdc.irqFlag) mainIrq = true;
+        // FDC: INTRQ is NOT routed to CPU IRQ on FM-7/FM77AV.
+        // FDC completion is detected by polling $FD18 (status register).
+        // Do NOT include fdc.irqFlag in mainIrq.
 
         // OPN Timer IRQ: routed through $FD03 bit3 "extended interrupt"
         // (FM7 Programmers Guide §3.1). Edge-triggered latch: set on new
@@ -1382,7 +1472,9 @@ export class FM7 {
             if (this._opnIrqLatch) mainIrq = true;
         }
 
+        // Level-triggered: assert or de-assert IRQ based on current sources
         if (mainIrq) this.mainCPU.irq();
+        else this.mainCPU.intr &= ~0x04;  // INTR_IRQ
 
         // Sub CPU FIRQ: keyboard-driven (active whenever key data available)
         // On real FM-7, the keyboard encoder IC generates FIRQ to sub CPU
@@ -1415,11 +1507,26 @@ export class FM7 {
                 this._subHalted = true;
                 this._subBusy = true;
                 this.scheduler.setSubHalted(true);
+                // EXPERIMENT: save sub CPU's view of $D430 state at halt time.
+                // Main CPU MMR writes to $D430 during halt may otherwise
+                // change apg from under the sub CPU's feet, causing it to
+                // write scroll registers to the wrong page on resume.
+                this._haltSavedActivePage = this.display.activeVramPage;
+                this._haltSavedDisplayPage = this.display.displayVramPage;
+                this.display._pushScrollTrace('HALT', { val: this.subCPU.pc });
             }
         } else {
             if (this._subHalted) {
                 this._subHalted = false;
                 this.scheduler.setSubHalted(false);
+                // EXPERIMENT: restore sub CPU's view of $D430 state.
+                // Sub CPU expects the apg/dpg state it had set itself.
+                if (this._haltSavedActivePage !== undefined) {
+                    this.display._setActiveVramPage(this._haltSavedActivePage);
+                    this.display._setDisplayVramPage(this._haltSavedDisplayPage);
+                    this._haltSavedActivePage = undefined;
+                }
+                this.display._pushScrollTrace('RUN', { val: this.subCPU.pc });
             }
         }
         // Apply CANCEL request
@@ -1483,10 +1590,9 @@ export class FM7 {
     // =========================================================================
 
     _wireFDC() {
-        // FDC IRQ is level-triggered: _checkAndAssertInterrupts polls
-        // fdc.irqFlag directly each cycle.  The flag is cleared when the
-        // CPU reads the FDC status register ($FD18) inside fdc.readIO().
-        // No separate callback-driven flag is needed.
+        // FDC IRQ uses an edge-triggered latch in _checkAndAssertInterrupts.
+        // The latch is set when fdc.irqFlag transitions 0→1, and cleared
+        // when the CPU reads $FD18 (status register) via _mainIORead.
     }
 
     // =========================================================================
@@ -1582,6 +1688,22 @@ export class FM7 {
         console.log(`CG ROM loaded: ${len} bytes (${Math.ceil(len / 0x0800)} banks)`);
     }
 
+    /**
+     * Load Kanji ROM (JIS level 1, 128KB).
+     * Accessed via $FD20/$FD21 (address) and $FD22/$FD23 (data).
+     * @param {ArrayBuffer} data
+     */
+    loadKanjiROM(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.kanjiROM.length);
+        // Reset to 0xFF before loading (in case data is smaller than 128KB)
+        this.kanjiROM.fill(0xFF);
+        this.kanjiROM.set(src.subarray(0, len));
+        this._kanjiSize = len;
+        this.romLoaded.kanji = true;
+        console.log(`Kanji ROM loaded: ${len} bytes`);
+    }
+
     // =========================================================================
     // FM77AV ROM Loading
     // =========================================================================
@@ -1617,57 +1739,24 @@ export class FM7 {
     }
 
     /**
-     * Patch Initiator ROM to behave as FM77AV (初代).
-     * 1. Force version string to all $FF (FM77AV identity)
-     * 2. Disable "new boot" code transfer (BRA → BRN)
-     * 3. Redirect new boot JMP $5000 → JMP $FE00 (old boot)
+     * Patch Initiator ROM version string to FM77AV identity.
+     *
+     * Historical note: this used to also force OLD BOOT path (disable NEW
+     * BOOT copy + redirect $5000→$FE00) for FM77AV-初代 compatibility, but
+     * that broke games whose IPL is written for the NEW BOOT memory layout
+     * (sec1 loaded to $0100 instead of $0300). NEW BOOT is now allowed to
+     * run; the version string patch is kept harmless.
      */
     _patchInitiatorToAV() {
         const rom = this.initiateROM;
         const patches = [];
 
-        // 1. Version string patch: force all $FF at $0B0E-$0B13
+        // Version string patch: force all $FF at $0B0E-$0B13
         if (rom[0x0B0E] !== 0xFF) {
             for (let i = 0x0B0E; i <= 0x0B13; i++) {
                 rom[i] = 0xFF;
             }
             patches.push('version string → $FF');
-        }
-
-        // 2. Find and disable BRA to new boot transfer code
-        //    First locate LDU #$7C00 (CE 7C 00) — the new boot copy source setup.
-        //    Then find the BRA ($20) that branches to that address.
-        //    Patch BRA ($20 xx) → BRN ($21 xx) to skip new boot code copy.
-        let newBootCopyAddr = -1;
-        for (let i = 0; i < this._initiateROMSize - 2; i++) {
-            if (rom[i] === 0xCE && rom[i + 1] === 0x7C && rom[i + 2] === 0x00) {
-                newBootCopyAddr = i;
-                break;
-            }
-        }
-        if (newBootCopyAddr >= 0) {
-            for (let i = 0; i < this._initiateROMSize - 1; i++) {
-                if (rom[i] === 0x20) {
-                    const disp = rom[i + 1];
-                    const target = i + 2 + (disp > 127 ? disp - 256 : disp);
-                    if (target === newBootCopyAddr) {
-                        rom[i] = 0x21; // BRA → BRN (Branch Never)
-                        patches.push(`BRA→BRN at $${(0x6000 + i).toString(16).toUpperCase()}`);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // 3. Find and redirect JMP $5000 → JMP $FE00
-        //    Patch $7E $50 $00 → $7E $FE $00
-        for (let i = 0; i < this._initiateROMSize - 2; i++) {
-            if (rom[i] === 0x7E && rom[i + 1] === 0x50 && rom[i + 2] === 0x00) {
-                rom[i + 1] = 0xFE;
-                // rom[i + 2] stays 0x00
-                patches.push(`JMP $5000→$FE00 at $${(0x6000 + i).toString(16).toUpperCase()}`);
-                break;
-            }
         }
 
         if (patches.length > 0) {
@@ -1721,6 +1810,8 @@ export class FM7 {
         this.opn.setAVMode(isAV);
         this.opn.setCPUClock(cpuHz);
         this.psg.setCPUClock(cpuHz);
+        // FM77AV has OPN built-in; always enable FM sound
+        if (isAV) this._fmCardEnabled = true;
         console.log(`Machine type set to: ${type} (CPU ${cpuHz/1000}kHz)`);
     }
 
@@ -1822,6 +1913,7 @@ export class FM7 {
         this._subHaltRequest = false;
         this._subCancelRequest = false;
         this._subBusy     = true;   // BUSY set on reset (sub CPU clears via $D40A read during init)
+        this._subBusyWasCleared = false;
         this._subCancel   = false;
         this._subAttn     = false;
         this._breakKey    = false;
@@ -1846,11 +1938,10 @@ export class FM7 {
                 this._patchInitiatorToAV();
             }
             this._initiatorActive = false; // Initiator ROM bypassed — start disabled
-            // Start in Type-C (FM-7 compatible) for both BASIC and DOS.
-            // Many FM77AV DOS games use FM-7 compatible sub CPU protocol
-            // with FM77AV display features ($FD12 for 320x200).
-            // Software that needs Type-A will switch via $FD13.
-            this._subMonitorType = SUB_MONITOR_C;
+            // Sub monitor type matches real hardware after Initiator:
+            //   DOS: Type-A (Initiator starts Type-A, doesn't switch for DOS)
+            //   BASIC: Type-C (Initiator switches to Type-C for F-BASIC)
+            this._subMonitorType = (bootMode === 'dos') ? SUB_MONITOR_A : SUB_MONITOR_C;
             this._cgRomBank = 0;
             this._nmiMaskSub = false;
             this._subResetFlag = false;
@@ -1940,34 +2031,40 @@ export class FM7 {
             }
         }
 
-        // Perform the FDC port initialization that Boot ROM's $FFC0 routine does:
-        // Clear FDC command registers and issue Force Interrupt ($40) to each port.
-        // This is equivalent to the _FDC_INIT routine in BOOT_BAS/BOOT_DOS.
-        this._initFDCPorts();
+        // For BASIC boot, perform FDC port initialization (Boot ROM's $FFC0).
+        // For DOS boot, BOOT_DOS.ROM handles FDC init itself.
+        if (bootMode === 'basic') {
+            this._initFDCPorts();
+        }
 
         // Reset sub CPU — it reads its own reset vector from sub ROM
         this.subCPU.reset();
         this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
         this.scheduler.setSubHalted(false);
 
-        // Determine main CPU start address based on boot mode
+        // Determine main CPU start address based on boot mode and machine type
         let mainPC;
-        if (bootMode === 'dos') {
-            // DOS boot: read boot sectors from disk image directly into RAM,
-            // then start execution at the IPL entry point ($0300).
-            mainPC = this._dosBootBypass();
+        let initiatorPath = false;
+        if (this.isFM77AV) {
+            // FM77AV: INITIATE.ROM is mandatory. Run it as 6809 code so all
+            // side effects (BIOS workspace init, $FBxx vectors, OPN/palette
+            // init, sub CPU data transfer) take effect — some 1985-era
+            // FM77AV games depend on these and break under any bypass path.
+            if (!this.romLoaded.initiate) {
+                console.error('[BOOT] FM77AV requires INITIATE.ROM. Falling back to bypass for compatibility.');
+                mainPC = (bootMode === 'dos') ? this._dosBootDirect() : this._basicBootBypass();
+            } else {
+                this._initiatorActive = true;
+                mainPC = 0x6000; // INITIATE.ROM entry (mirrored at $FFFE-$FFFF)
+                initiatorPath = true;
+                console.log('[BOOT] FM77AV: running INITIATE.ROM as 6809 code (PC=$6000)');
+            }
+        } else if (bootMode === 'dos') {
+            // FM-7 DOS boot: run BOOT_DOS.ROM code at $FE00 on the 6809.
+            mainPC = this._dosBootDirect();
         } else {
-            // BASIC boot: jump directly to F-BASIC cold start.
+            // FM-7 BASIC boot: jump directly to F-BASIC cold start (bypass).
             mainPC = this._basicBootBypass();
-        }
-
-        // On real hardware, the boot ROM's FDC operations take hundreds of
-        // thousands of CPU cycles. During this time the sub CPU completes its
-        // initialization and clears BUSY (via $D40A read). Our bypass loads
-        // sectors instantly (0 cycles), so the sub CPU hasn't had time to clear
-        // BUSY. Pre-clear it here to match the state the IPL code expects.
-        if (bootMode === 'dos') {
-            this._subBusy = false;
         }
 
         // Set main CPU initial state (DP=0, interrupts masked, PC=target)
@@ -1978,9 +2075,9 @@ export class FM7 {
         this.mainRAM[0xFFFF] = mainPC & 0xFF;
 
         // Log boot info
-        console.log(`${this._machineType.toUpperCase()} reset (boot: ${bootMode}, bypass)`);
+        console.log(`${this._machineType.toUpperCase()} reset (boot: ${bootMode}, ${initiatorPath ? 'INITIATE.ROM' : 'bypass'})`);
         console.log(`  Main CPU PC: $${mainPC.toString(16).toUpperCase().padStart(4, '0')}`);
-        console.log(`  Initiator: BYPASSED, ROM loaded: ${this.romLoaded.initiate}`);
+        console.log(`  Initiator: ${initiatorPath ? 'ACTIVE (executing)' : 'BYPASSED'}, ROM loaded: ${this.romLoaded.initiate}`);
         console.log(`  Sub monitor: Type-${['A','B','C'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
         console.log(`  Disk in drive 0: ${hasDisk ? 'YES' : 'NO'}, F-BASIC ROM: ${this.romLoaded.fbasic ? 'YES' : 'NO'}`);
         const srvHi = this._subRead(0xFFFE);
@@ -2020,70 +2117,86 @@ export class FM7 {
     }
 
     /**
-     * DOS boot bypass: read boot sectors from disk image directly into RAM.
-     * Emulates what BOOT_DOS.ROM does via FDC:
-     *   1. Read Track 0, Side 0, Sector 1 (256B) → RAM $0300
-     *   2. Read Track 0, Side 0, Sector 2 (256B) → RAM $0400
-     *   3. Set up FDC state (drive 0, track 0)
-     *   4. Jump to $0300 (IPL entry point)
-     * @returns {number} Start address for main CPU
+     * DOS boot direct: let BOOT_DOS.ROM run on the 6809.
+     * BOOT_DOS handles FDC initialization, sector reading, and IPL loading.
+     * This matches the real hardware boot sequence.
+     *
+     * For FM77AV: install boot_dos.rom code to RAM $FE00 (since $FE00 reads
+     * from mainRAM after Initiator bypass). The sub CPU runs Type-A.
+     * For FM-7: $FE00 reads from bootROM directly. No install needed.
+     *
+     * @returns {number} Start address for main CPU ($FE00)
      */
-    _dosBootBypass() {
+    _dosBootDirect() {
         const disk = this.fdc.disks[0];
         if (!disk || !disk.loaded) {
             console.error('[BOOT] No disk in drive 0 — falling back to BASIC');
             return this._basicBootBypass();
         }
 
-        // Boot ROM parameter tables specify:
-        //   Table 1: READ sector 1, Track 0, Side 0 → buffer $0300
-        //   Table 2: READ sector 2, Track 0, Side 0 → buffer $0400
-        const loadMap = [
-            { sector: 1, addr: 0x0300 },
-            { sector: 2, addr: 0x0400 },
-        ];
-
-        let sectorsLoaded = 0;
-        for (const { sector: sNum, addr } of loadMap) {
-            const sector = disk.getSector(0, 0, sNum);
-            if (!sector || !sector.data) {
-                console.warn(`[BOOT] Sector ${sNum} not found on Track 0 Side 0`);
-                continue;
-            }
-            for (let i = 0; i < sector.data.length; i++) {
-                this.mainRAM[addr + i] = sector.data[i];
-            }
-            sectorsLoaded++;
-            console.log(`[BOOT] DOS bypass: sector ${sNum} (${sector.data.length}B) → $${addr.toString(16).toUpperCase().padStart(4, '0')}`);
+        // For FM77AV: install boot_dos.rom code into RAM at $FE00-$FFDF.
+        // On real hardware, the Initiator ROM copies this from its embedded
+        // DOS boot code. We use the standalone boot_dos.rom.
+        if (this.isFM77AV) {
+            this._installBootROMtoRAM();
         }
 
-        if (sectorsLoaded === 0) {
-            console.error('[BOOT] No boot sectors readable — falling back to BASIC');
-            return this._basicBootBypass();
+        // Some IPLs (e.g. BUG05/Ys) use absolute addresses assuming the
+        // code starts at $0000, but boot_dos.rom loads sectors to $0300.
+        // Detect this by checking if the IPL references addresses below
+        // $0300 (LDX #$00xx, JSR $00xx-$02xx, etc.) and pre-copy the
+        // boot sectors to $0000 so these references resolve correctly.
+        this._preloadBootSectorsToZero(disk);
+
+        // BOOT_DOS.ROM will handle everything:
+        //   1. Set DP=$FD, SP=$FC7F
+        //   2. Check $FD05 for key status
+        //   3. Read boot sectors from disk via FDC
+        //   4. JMP $0300 (IPL entry point)
+        //   5. IPL can call back to $FE02/$FE05/$FE08 for more FDC ops
+        console.log(`[BOOT] DOS direct: running BOOT_DOS.ROM at $FE00`);
+        return 0xFE00;
+    }
+
+    /**
+     * Pre-load boot sectors to $0000 for IPLs that use absolute $0000-based addresses.
+     * boot_dos.rom loads sector 1→$0300, sector 2→$0400. Some IPLs reference
+     * code/data at $0000-$02FF (designed for $0000 base). This copies the first
+     * 16 sectors (T0/S0) to $0000-$0FFF so these references work.
+     */
+    _preloadBootSectorsToZero(disk) {
+        const sector1 = disk.getSector(0, 0, 1);
+        if (!sector1 || !sector1.data) return;
+        const s1data = sector1.data;
+
+        // Check if sector 1 IPL references addresses below $0300
+        // Look for extended addressing: BD xx xx (JSR), 7E xx xx (JMP),
+        // 8E xx xx (LDX#), FE xx xx (LDU), BE xx xx (LDX)
+        let needsCopy = false;
+        for (let i = 0; i < Math.min(s1data.length, 64); i++) {
+            const b = s1data[i];
+            if ((b === 0xBD || b === 0x7E || b === 0x8E || b === 0xBE || b === 0xFE)
+                && i + 2 < s1data.length) {
+                const addr = (s1data[i + 1] << 8) | s1data[i + 2];
+                if (addr >= 0x0020 && addr < 0x0300) {
+                    needsCopy = true;
+                    break;
+                }
+            }
         }
 
-        // IPL code at $0300 may call back into Boot ROM FDC routines
-        // (e.g. JSR $FE08 for sector read). Install boot code into RAM
-        // so these callbacks work regardless of machine type or ROM set.
-        this._installBootROMtoRAM();
-
-        // Set up FDC state so IPL code can continue reading from disk.
-        // Emulate what Boot ROM does: select drive 0, RESTORE to track 0.
-        this._mainIOWrite(0xFD1D, 0x80);  // Drive 0, motor ON
-        this._mainIOWrite(0xFD1C, 0x00);  // Side 0
-        // Set FDC to post-RESTORE state: track 0, head engaged, ready.
-        this.fdc.trackReg = 0;
-        this.fdc.sectorReg = 1;
-        this.fdc.headPosition[0] = 0;
-        // STATUS.TRACK0 = 0x04, STATUS.HEAD_ENGAGED = 0x20
-        this.fdc.statusReg = 0x04 | 0x20;
-        this.fdc.state = 0; // FDC_STATE.IDLE
-
-        // DOS boot: BASIC ROM disabled (games use $8000-$FBFF as RAM)
-        this._basicRomEnabled = false;
-
-        // IPL entry point
-        return 0x0300;
+        if (needsCopy) {
+            // Copy T0/S0 sectors 1-16 to $0000-$0FFF
+            for (let sec = 1; sec <= 16; sec++) {
+                const secObj = disk.getSector(0, 0, sec);
+                if (!secObj || !secObj.data) break;
+                const base = (sec - 1) * secObj.data.length;
+                for (let i = 0; i < secObj.data.length; i++) {
+                    this.mainRAM[base + i] = secObj.data[i];
+                }
+            }
+            console.log('[BOOT] IPL uses $0000-based addresses: pre-copied T0/S0 to $0000');
+        }
     }
 
     /**

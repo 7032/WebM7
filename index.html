@@ -53,8 +53,8 @@
     <div class="side-panel">
 
         <!-- Control -->
-        <div class="sp-section">
-            <h3>Control</h3>
+        <div class="sp-section" data-section="control">
+            <h3 class="sp-section-toggle">Control</h3>
             <div class="btn-row">
                 <label class="power-switch" title="Power On / Off">
                     <input type="checkbox" id="powerToggle">
@@ -95,14 +95,14 @@
         </div>
 
         <!-- ROM Files -->
-        <div class="sp-section">
-            <h3>ROM Files</h3>
+        <div class="sp-section" data-section="romfiles">
+            <h3 class="sp-section-toggle">ROM Files</h3>
             <label>Folder:</label>
             <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
                 <input type="file" id="romFolder" webkitdirectory multiple>
                 <span class="status-tag" id="romStatus">--</span>
             </div>
-            <label>Individual:</label>
+            <label>ROM files:</label>
             <div class="rom-list">
                 <div class="rom-item">
                     <span class="rom-name">FBASIC30.ROM</span>
@@ -115,6 +115,11 @@
                     <span class="status-tag" id="statusBootDos">--</span>
                 </div>
                 <div class="rom-item">
+                    <span class="rom-name">BOOT_BAS.ROM</span>
+                    <input type="file" id="romBootBas" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusBootBas">--</span>
+                </div>
+                <div class="rom-item">
                     <span class="rom-name">SUBSYS_C.ROM</span>
                     <input type="file" id="romSubSys" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusSubSys">--</span>
@@ -123,6 +128,11 @@
             <!-- FM77AV additional ROMs (hidden by default) -->
             <div class="rom-list rom-list-av" id="romListAV" style="display:none;margin-top:6px;">
                 <label style="color:#e8a848;">FM77AV ROMs:</label>
+                <div class="rom-item">
+                    <span class="rom-name">INITIATE.ROM</span>
+                    <input type="file" id="romInitiate" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusInitiate">--</span>
+                </div>
                 <div class="rom-item">
                     <span class="rom-name">SUBSYS_A.ROM</span>
                     <input type="file" id="romSubSysA" accept=".rom,.ROM,.bin">
@@ -138,6 +148,11 @@
                     <input type="file" id="romCG" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusCG">--</span>
                 </div>
+                <div class="rom-item">
+                    <span class="rom-name">KANJI.ROM</span>
+                    <input type="file" id="romKanji" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusKanji">--</span>
+                </div>
             </div>
             <div id="romInfoPanel" style="margin-top:6px;font-size:10px;color:#aaa;display:none;">
                 <details>
@@ -145,39 +160,34 @@
                     <pre id="romInfoText" style="margin:4px 0;white-space:pre-wrap;word-break:break-all;font-size:8px;line-height:1.3;max-height:150px;overflow-y:auto;overflow-x:hidden;"></pre>
                 </details>
             </div>
+            <div style="margin-top:4px;text-align:right;">
+                <button id="clearStorageBtn" style="font-size:9px;padding:1px 4px;cursor:pointer;" title="Clear saved ROMs and disks from browser storage">Clear Saved</button>
+            </div>
         </div>
 
         <!-- Disk -->
-        <div class="sp-section">
-            <h3>Disk Image</h3>
-            <label>Drive 0:</label>
+        <div class="sp-section" data-section="disks">
+            <h3 class="sp-section-toggle">Disk Images</h3>
+            <label>Drive 0 <span class="fdc-led" id="fdcLed0"></span></label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile0" accept=".d77,.D77,.2d,.2D">
                 <button id="diskEjectBtn0" style="font-size:10px;padding:1px 6px;">Eject</button>
                 <span class="status-tag" id="diskStatus0">--</span>
             </div>
-            <label>Drive 1:</label>
+            <label>Drive 1 <span class="fdc-led" id="fdcLed1"></span></label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile1" accept=".d77,.D77,.2d,.2D">
                 <button id="diskEjectBtn1" style="font-size:10px;padding:1px 6px;">Eject</button>
                 <span class="status-tag" id="diskStatus1">--</span>
             </div>
-            <div class="fdc-indicator" style="display:flex;align-items:center;gap:8px;margin-top:6px;">
-                <div style="display:flex;align-items:center;gap:4px;">
-                    <span class="fdc-led" id="fdcLed0"></span>
-                    <span style="font-size:11px;color:#aaa;">Dr0</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:4px;">
-                    <span class="fdc-led" id="fdcLed1"></span>
-                    <span style="font-size:11px;color:#aaa;">Dr1</span>
-                </div>
-                <span style="font-size:11px;color:#888;margin-left:4px;" id="fdcTrackInfo">--</span>
+            <div class="fdc-indicator" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+                <span style="font-size:11px;color:#888;" id="fdcTrackInfo">--</span>
             </div>
         </div>
 
         <!-- Tape -->
-        <div class="sp-section">
-            <h3>Tape Image</h3>
+        <div class="sp-section" data-section="tape">
+            <h3 class="sp-section-toggle">Tape Image</h3>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="tapeFile" accept=".t77,.T77">
                 <button id="tapeEjectBtn" style="font-size:10px;padding:1px 6px;">Eject</button>
@@ -380,7 +390,7 @@
         <tr><th>セクション</th><th>内容</th></tr>
         <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（DOS / BASIC）、FM Sound Card（FM-7のみ）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Powerスライドスイッチ（ON/OFF）、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功。ROM Info で読み込み済みROMのサイズ・ハッシュを確認可能（Copy ボタンでクリップボードにコピー）</td></tr>
-        <tr><td><strong>Disk Image</strong></td><td>D77 形式のディスクイメージを Drive 0 にセット。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
+        <tr><td><strong>Disk Images</strong></td><td>D77 形式のディスクイメージを Drive 0 / Drive 1 にセット。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
         <tr><td><strong>Tape Image</strong></td><td>T77 形式のテープイメージをセット。REW（巻き戻し）、Eject ボタン。CMT LED付き</td></tr>
         <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示・FM-7キーボードレイアウト、BREAK キー変更、パレット、PSG レジスタ</td></tr>
         </table>
@@ -529,8 +539,8 @@ const screenContainer = document.getElementById('screenContainer');
 // UI elements
 const romFolderInput  = document.getElementById('romFolder');
 const romFBasicInput  = document.getElementById('romFBasic');
-// romBootBas removed (Boot ROM bypass)
 const romBootDosInput = document.getElementById('romBootDos');
+const romBootBasInput = document.getElementById('romBootBas');
 const romSubSysInput  = document.getElementById('romSubSys');
 const romCGInput      = document.getElementById('romCG');
 const diskFileInput0  = document.getElementById('diskFile0');
@@ -544,8 +554,8 @@ const tapeEjectBtn    = document.getElementById('tapeEjectBtn');
 
 const romStatusEl     = document.getElementById('romStatus');
 const statusFBasicEl  = document.getElementById('statusFBasic');
-// statusBootBas removed (Boot ROM bypass)
 const statusBootDosEl = document.getElementById('statusBootDos');
+const statusBootBasEl = document.getElementById('statusBootBas');
 const statusSubSysEl  = document.getElementById('statusSubSys');
 const statusCGEl      = document.getElementById('statusCG');
 const diskStatusEl0   = document.getElementById('diskStatus0');
@@ -579,12 +589,14 @@ const psgRegsEl       = document.getElementById('psgRegs');
 
 // FM77AV ROM elements
 const romListAV       = document.getElementById('romListAV');
+const romInitiateInput = document.getElementById('romInitiate');
 const romSubSysAInput  = document.getElementById('romSubSysA');
 const romSubSysBInput  = document.getElementById('romSubSysB');
-// romFBasicAV removed (duplicate of common FBASIC30)
+const romKanjiInput    = document.getElementById('romKanji');
+const statusInitiateEl = document.getElementById('statusInitiate');
 const statusSubSysAEl  = document.getElementById('statusSubSysA');
 const statusSubSysBEl  = document.getElementById('statusSubSysB');
-// statusFBasicAV removed (duplicate of common FBASIC30)
+const statusKanjiEl    = document.getElementById('statusKanji');
 const siteTitle        = document.getElementById('siteTitle');
 
 // =========================================================================
@@ -617,6 +629,9 @@ document.querySelectorAll('input[name="machineType"]').forEach(radio => {
     radio.addEventListener('change', () => {
         updateMachineType();
         if (typeof updateRomInfo === 'function') updateRomInfo();
+        // Persist machine type to IndexedDB
+        const mt = document.querySelector('input[name="machineType"]:checked').value;
+        saveSetting('machineType', mt);
     });
 });
 
@@ -662,17 +677,9 @@ document.querySelectorAll('input[name="joyPort"]').forEach(radio => {
         if (fm7._running) return; // Locked during run
         const port = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
         fm7.setJoystickPort(port);
-        localStorage.setItem('fm7_joyport', port.toString());
+        saveSetting('joyPort', port);
     });
 });
-// Restore saved port
-const savedJoyPort = localStorage.getItem('fm7_joyport');
-if (savedJoyPort !== null) {
-    const port = parseInt(savedJoyPort);
-    fm7.setJoystickPort(port);
-    const radio = document.querySelector(`input[name="joyPort"][value="${port}"]`);
-    if (radio) radio.checked = true;
-}
 
 // =========================================================================
 // Cursor → Numpad preset
@@ -698,15 +705,8 @@ function applyCursorToNumpad(enabled) {
 cursorToNumpadCheck.addEventListener('change', () => {
     const on = cursorToNumpadCheck.checked;
     applyCursorToNumpad(on);
-    localStorage.setItem('fm7_cursor_to_numpad', on ? '1' : '0');
+    saveSetting('cursorToNumpad', on);
 });
-
-// Restore saved state
-const savedCursorToNumpad = localStorage.getItem('fm7_cursor_to_numpad');
-if (savedCursorToNumpad === '1') {
-    cursorToNumpadCheck.checked = true;
-    applyCursorToNumpad(true);
-}
 
 // =========================================================================
 // Screenshot
@@ -800,47 +800,114 @@ document.addEventListener('keydown', (e) => {
 });
 
 // =========================================================================
+// IndexedDB Persistent Storage for ROMs and Disks
+// =========================================================================
+// Stores loaded ROM/Disk binary data so users don't need to re-select files
+// after page reload. Uses IndexedDB (handles binary, 50MB+ quota).
+
+const DB_NAME = 'DevM7Storage';
+const DB_VERSION = 2;
+const STORE_ROMS = 'roms';
+const STORE_DISKS = 'disks';
+const STORE_SETTINGS = 'settings';
+
+let _dbPromise = null;
+function openDB() {
+    if (_dbPromise) return _dbPromise;
+    _dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(STORE_ROMS)) db.createObjectStore(STORE_ROMS);
+            if (!db.objectStoreNames.contains(STORE_DISKS)) db.createObjectStore(STORE_DISKS);
+            if (!db.objectStoreNames.contains(STORE_SETTINGS)) db.createObjectStore(STORE_SETTINGS);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+    return _dbPromise;
+}
+
+async function dbPut(storeName, key, value) {
+    try {
+        const db = await openDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            tx.objectStore(storeName).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) { console.warn('dbPut failed:', e); }
+}
+
+async function dbGet(storeName, key) {
+    try {
+        const db = await openDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readonly');
+            const req = tx.objectStore(storeName).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (e) { console.warn('dbGet failed:', e); return undefined; }
+}
+
+async function dbDelete(storeName, key) {
+    try {
+        const db = await openDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            tx.objectStore(storeName).delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) { console.warn('dbDelete failed:', e); }
+}
+
+// Save/load a ROM slot. Data is stored as ArrayBuffer keyed by slot name.
+async function saveROM(slot, data) { return dbPut(STORE_ROMS, slot, data); }
+async function loadROM(slot) { return dbGet(STORE_ROMS, slot); }
+
+// Save/load a disk slot with its filename.
+async function saveDisk(slot, name, data) {
+    return dbPut(STORE_DISKS, slot, { name, data });
+}
+async function loadDiskSaved(slot) { return dbGet(STORE_DISKS, slot); }
+
+// Save/load a setting (machineType, joyPort, cursorToNumpad, sectionState).
+async function saveSetting(key, value) { return dbPut(STORE_SETTINGS, key, value); }
+async function loadSetting(key) { return dbGet(STORE_SETTINGS, key); }
+
+// =========================================================================
 // ROM Loading - Folder
 // =========================================================================
+
+// Map lowercase ROM filename → { loader, status, slot }
+const ROM_FILE_MAP = {
+    'fbasic30.rom': { loader: (d) => fm7.loadFBasicROM(d), status: () => statusFBasicEl, slot: 'fbasic' },
+    'boot_dos.rom': { loader: (d) => fm7.loadBootROM(d),   status: () => statusBootDosEl, slot: 'bootdos' },
+    'boot_bas.rom': { loader: (d) => fm7.loadBootBasROM(d), status: () => statusBootBasEl, slot: 'bootbas' },
+    'subsys_c.rom': { loader: (d) => fm7.loadSubROM(d),    status: () => statusSubSysEl, slot: 'subsys_c' },
+    'subsyscg.rom': { loader: (d) => fm7.loadCGROM(d),     status: () => statusCGEl,     slot: 'cg' },
+    'initiate.rom': { loader: (d) => fm7.loadInitiateROM(d), status: () => statusInitiateEl, slot: 'initiate' },
+    'subsys_a.rom': { loader: (d) => fm7.loadSubROM_A(d),  status: () => statusSubSysAEl, slot: 'subsys_a' },
+    'subsys_b.rom': { loader: (d) => fm7.loadSubROM_B(d),  status: () => statusSubSysBEl, slot: 'subsys_b' },
+    'kanji.rom':   { loader: (d) => fm7.loadKanjiROM(d),   status: () => statusKanjiEl,   slot: 'kanji' },
+};
 
 romFolderInput.addEventListener('change', async (e) => {
     const files = e.target.files;
     let loaded = 0;
     for (const file of files) {
         const name = file.name.toLowerCase();
+        const entry = ROM_FILE_MAP[name];
+        if (!entry) continue;
         try {
             const data = await file.arrayBuffer();
-            if (name === 'fbasic30.rom') {
-                fm7.loadFBasicROM(data);
-                markLoaded(statusFBasicEl);
-                loaded++;
-            } else if (name === 'boot_dos.rom') {
-                fm7.loadBootROM(data);
-                markLoaded(statusBootDosEl);
-                loaded++;
-            } else if (name === 'boot_bas.rom') {
-                fm7.loadBootBasROM(data);
-                loaded++;
-            } else if (name === 'subsys_c.rom') {
-                fm7.loadSubROM(data);
-                markLoaded(statusSubSysEl);
-                loaded++;
-            } else if (name === 'subsyscg.rom') {
-                fm7.loadCGROM(data);
-                markLoaded(statusCGEl);
-                loaded++;
-            } else if (name === 'initiate.rom') {
-                fm7.loadInitiateROM(data);
-                loaded++;
-            } else if (name === 'subsys_a.rom') {
-                fm7.loadSubROM_A(data);
-                markLoaded(statusSubSysAEl);
-                loaded++;
-            } else if (name === 'subsys_b.rom') {
-                fm7.loadSubROM_B(data);
-                markLoaded(statusSubSysBEl);
-                loaded++;
-            }
+            entry.loader(data);
+            if (entry.status) markLoaded(entry.status());
+            await saveROM(entry.slot, data);
+            loaded++;
         } catch (err) {
             console.error(`Failed to load ${file.name}:`, err);
         }
@@ -855,7 +922,7 @@ romFolderInput.addEventListener('change', async (e) => {
 // ROM Loading - Individual
 // =========================================================================
 
-function setupIndividualROM(input, loaderFn, statusEl) {
+function setupIndividualROM(input, loaderFn, statusEl, slot) {
     input.addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -863,6 +930,7 @@ function setupIndividualROM(input, loaderFn, statusEl) {
             const data = await file.arrayBuffer();
             loaderFn(data);
             markLoaded(statusEl);
+            if (slot) await saveROM(slot, data);
             if (typeof updateRomInfo === 'function') setTimeout(updateRomInfo, 100);
         } catch (err) {
             statusEl.textContent = 'Error';
@@ -871,14 +939,114 @@ function setupIndividualROM(input, loaderFn, statusEl) {
     });
 }
 
-setupIndividualROM(romFBasicInput,  (d) => fm7.loadFBasicROM(d),  statusFBasicEl);
-setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosEl);
-setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl);
+setupIndividualROM(romFBasicInput,  (d) => fm7.loadFBasicROM(d),  statusFBasicEl,  'fbasic');
+setupIndividualROM(romBootDosInput, (d) => fm7.loadBootROM(d),    statusBootDosEl, 'bootdos');
+setupIndividualROM(romBootBasInput, (d) => fm7.loadBootBasROM(d), statusBootBasEl, 'bootbas');
+setupIndividualROM(romSubSysInput,  (d) => fm7.loadSubROM(d),     statusSubSysEl,  'subsys_c');
 
 // FM77AV ROMs
-setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysAEl);
-setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl);
-setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl);
+setupIndividualROM(romInitiateInput, (d) => fm7.loadInitiateROM(d), statusInitiateEl, 'initiate');
+setupIndividualROM(romSubSysAInput,  (d) => fm7.loadSubROM_A(d),   statusSubSysAEl, 'subsys_a');
+setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysBEl, 'subsys_b');
+setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl,      'cg');
+setupIndividualROM(romKanjiInput,    (d) => fm7.loadKanjiROM(d),   statusKanjiEl,   'kanji');
+
+// Restore persisted settings from IndexedDB on startup.
+// One-time migration: pull from legacy localStorage if IndexedDB is empty.
+(async function restoreSettings() {
+    // Machine type
+    let mt = await loadSetting('machineType');
+    if (mt === undefined) {
+        // No legacy storage for machineType — leave default (FM-7)
+    }
+    if (mt === 'fm7' || mt === 'fm77av') {
+        const r = document.querySelector(`input[name="machineType"][value="${mt}"]`);
+        if (r) {
+            r.checked = true;
+            updateMachineType();
+            if (typeof updateRomInfo === 'function') updateRomInfo();
+        }
+    }
+
+    // Joystick port
+    let jp = await loadSetting('joyPort');
+    if (jp === undefined) {
+        // Migrate from legacy localStorage
+        const legacy = localStorage.getItem('fm7_joyport');
+        if (legacy !== null) {
+            jp = parseInt(legacy);
+            await saveSetting('joyPort', jp);
+            localStorage.removeItem('fm7_joyport');
+        }
+    }
+    if (jp === 0 || jp === 1) {
+        fm7.setJoystickPort(jp);
+        const r = document.querySelector(`input[name="joyPort"][value="${jp}"]`);
+        if (r) r.checked = true;
+    }
+
+    // Cursor → Ten Key
+    let ck = await loadSetting('cursorToNumpad');
+    if (ck === undefined) {
+        // Migrate from legacy localStorage
+        const legacy = localStorage.getItem('fm7_cursor_to_numpad');
+        if (legacy !== null) {
+            ck = (legacy === '1');
+            await saveSetting('cursorToNumpad', ck);
+            localStorage.removeItem('fm7_cursor_to_numpad');
+        }
+    }
+    if (ck === true) {
+        cursorToNumpadCheck.checked = true;
+        applyCursorToNumpad(true);
+    }
+
+    // Section collapse states
+    const sectionState = await loadSetting('sectionState');
+    if (sectionState && typeof sectionState === 'object') {
+        for (const [key, collapsed] of Object.entries(sectionState)) {
+            const sec = document.querySelector(`.sp-section[data-section="${key}"]`);
+            if (sec && collapsed) sec.classList.add('collapsed');
+        }
+    }
+})();
+
+// Section collapse: click h3 to toggle, persist state to IndexedDB
+document.querySelectorAll('.sp-section h3.sp-section-toggle').forEach(h3 => {
+    h3.addEventListener('click', async () => {
+        const sec = h3.closest('.sp-section');
+        if (!sec) return;
+        sec.classList.toggle('collapsed');
+        // Save state for all sections
+        const state = {};
+        document.querySelectorAll('.sp-section[data-section]').forEach(s => {
+            state[s.dataset.section] = s.classList.contains('collapsed');
+        });
+        await saveSetting('sectionState', state);
+    });
+});
+
+// Restore ROMs from IndexedDB on startup
+(async function restoreROMs() {
+    let restored = 0;
+    for (const [filename, entry] of Object.entries(ROM_FILE_MAP)) {
+        const data = await loadROM(entry.slot);
+        if (data) {
+            try {
+                entry.loader(data);
+                if (entry.status) markLoaded(entry.status());
+                restored++;
+            } catch (err) {
+                console.warn(`Failed to restore ${filename}:`, err);
+            }
+        }
+    }
+    if (restored > 0) {
+        romStatusEl.textContent = `${restored} ROM(s) (restored)`;
+        romStatusEl.classList.add('loaded');
+        if (typeof updateRomInfo === 'function') setTimeout(updateRomInfo, 100);
+    }
+})();
 
 // =========================================================================
 // ROM Info Display (MD5, size, model detection)
@@ -926,6 +1094,8 @@ async function updateRomInfo() {
               size: fm7._subROM_BSize },
             { name: 'SUBSYSCG.ROM', data: fm7.cgROM, loaded: fm7.romLoaded.cg,
               size: fm7._cgSize },
+            { name: 'KANJI.ROM',   data: fm7.kanjiROM, loaded: fm7.romLoaded.kanji,
+              size: fm7._kanjiSize },
         ] : []),
     ];
 
@@ -987,6 +1157,7 @@ function setupDiskInput(fileInput, statusEl, driveNum) {
             if (ok) {
                 statusEl.textContent = file.name;
                 statusEl.classList.add('loaded');
+                await saveDisk(`drive${driveNum}`, file.name, data);
             } else {
                 statusEl.textContent = 'Fail';
             }
@@ -998,6 +1169,43 @@ function setupDiskInput(fileInput, statusEl, driveNum) {
 }
 setupDiskInput(diskFileInput0, diskStatusEl0, 0);
 setupDiskInput(diskFileInput1, diskStatusEl1, 1);
+
+// Restore disks from IndexedDB on startup
+(async function restoreDisks() {
+    for (const driveNum of [0, 1]) {
+        const saved = await loadDiskSaved(`drive${driveNum}`);
+        if (saved && saved.data) {
+            try {
+                const ok = fm7.loadDisk(driveNum, saved.data);
+                if (ok) {
+                    const el = driveNum === 0 ? diskStatusEl0 : diskStatusEl1;
+                    el.textContent = saved.name + ' (restored)';
+                    el.classList.add('loaded');
+                }
+            } catch (err) {
+                console.warn(`Failed to restore disk drive ${driveNum}:`, err);
+            }
+        }
+    }
+})();
+
+// Clear saved ROMs and disks from storage
+document.getElementById('clearStorageBtn').addEventListener('click', async () => {
+    if (!confirm('Clear all saved ROMs and disks from browser storage?')) return;
+    try {
+        const db = await openDB();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_ROMS, STORE_DISKS], 'readwrite');
+            tx.objectStore(STORE_ROMS).clear();
+            tx.objectStore(STORE_DISKS).clear();
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+        });
+        alert('Saved ROMs and disks cleared. Reload the page to re-select files.');
+    } catch (e) {
+        alert('Failed to clear storage: ' + e.message);
+    }
+});
 
 // =========================================================================
 // Tape Loading
@@ -1117,11 +1325,12 @@ pauseBtn.addEventListener('click', () => {
 
 // Disk eject
 function setupDiskEject(btn, fileInput, statusEl, driveNum) {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
         fm7.fdc.ejectDisk(driveNum);
         fileInput.value = '';
         statusEl.textContent = '--';
         statusEl.classList.remove('loaded');
+        await dbDelete(STORE_DISKS, `drive${driveNum}`);
     });
 }
 setupDiskEject(diskEjectBtn0, diskFileInput0, diskStatusEl0, 0);

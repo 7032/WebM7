@@ -86,13 +86,27 @@ export class Display {
 
         // VRAM offset register (scroll offset within each plane)
         // FM77AV: separate offset per page
-        this.vramOffset = [0, 0];       // [page0, page1]
+        this.vramOffset = [0, 0];       // [page0, page1] - register value
+        this.crtcOffset = [0, 0];       // [page0, page1] - applied scroll offset
+        this._vramOffsetCount = [0, 0]; // Counter: scroll executes on even count
         this.vramOffsetFlag = false;    // Extended VRAM offset (bit 2 of $D430)
 
         // FM77AV VRAM page control
         this.activeVramPage = 0;    // Sub CPU writes to this page (0 or 1)
         this.displayVramPage = 0;   // Renderer reads from this page (0 or 1)
         this.displayMode = DISPLAY_MODE_640;  // 640x200 or 320x200
+
+        // Diagnostic ring buffer for scroll register / display state events.
+        // Tags: D40E, D40F, SCROLL, APG, DPG, MODE, D430, PAL_B/R/G, FD37
+        // DISABLED BY DEFAULT — set fm7.display.enableScrollTrace = true to
+        // start capturing. Allocating an event object per hot-path I/O write
+        // (e.g. D430 inside a tight loop) causes severe GC pressure.
+        // Inspect via fm7.display.dumpScrollTrace() in browser console.
+        this.enableScrollTrace = false;
+        this._scrollTraceSize = 65536;
+        this._scrollTrace = new Array(this._scrollTraceSize);
+        this._scrollTraceIdx = 0;
+        this._scrollTraceCount = 0;
 
         // FM77AV mode flag - set by fm7.js when machine type is FM77AV
         this.isAV = false;
@@ -995,82 +1009,137 @@ export class Display {
     //  VRAM offset (scroll)
     // ---------------------------------------------------------------
 
-    /** Write VRAM offset high byte — applied to the active page's offset */
-    _updateVramOffsetHigh(value) {
-        const pg = this.activeVramPage;
-        const high = (value & 0x3F) << 8;
-        this._pendingOffsetHigh = high;
+    /** Push one event to the scroll trace ring buffer (no-op if disabled). */
+    _pushScrollTrace(tag, extra) {
+        if (!this.enableScrollTrace) return;
+        const e = {
+            tag,
+            mode: this.displayMode,
+            apg: this.activeVramPage,
+            dpg: this.displayVramPage,
+            flag: this.vramOffsetFlag,
+            ofs0: this.vramOffset[0],
+            ofs1: this.vramOffset[1],
+            crt0: this.crtcOffset[0],
+            crt1: this.crtcOffset[1],
+        };
+        if (extra) Object.assign(e, extra);
+        this._scrollTrace[this._scrollTraceIdx] = e;
+        this._scrollTraceIdx = (this._scrollTraceIdx + 1) % this._scrollTraceSize;
+        this._scrollTraceCount++;
     }
 
-    /** Write VRAM offset low byte — applied to the active page's offset */
+    /** Return scroll trace events in chronological order (oldest first). */
+    dumpScrollTrace() {
+        const out = [];
+        const n = Math.min(this._scrollTraceCount, this._scrollTraceSize);
+        const start = this._scrollTraceCount < this._scrollTraceSize
+            ? 0 : this._scrollTraceIdx;
+        for (let i = 0; i < n; i++) {
+            out.push(this._scrollTrace[(start + i) % this._scrollTraceSize]);
+        }
+        return out;
+    }
+
+    /** Reset the scroll trace ring buffer. */
+    clearScrollTrace() {
+        this._scrollTraceIdx = 0;
+        this._scrollTraceCount = 0;
+    }
+
+    /** Write VRAM offset high byte ($D40E) */
+    _updateVramOffsetHigh(value) {
+        const pg = this.activeVramPage;
+        // High 6 bits of 14-bit offset
+        let offset = (value & 0x3F) << 8;
+        offset |= (this.vramOffset[pg] & 0xFF);  // keep existing low byte
+        this.vramOffset[pg] = offset;
+        this._pushScrollTrace('D40E', { val: value });
+        this._scrollCountUp(pg);
+    }
+
+    /** Write VRAM offset low byte ($D40F) */
     _updateVramOffsetLow(value) {
         const pg = this.activeVramPage;
-        // FM77AV: When extended offset flag is OFF, low 5 bits are masked
-        // FM-7: no masking, all 14 bits of offset are used (MC6845 native)
-        // FM77AV: extended offset flag ($D430 bit2) controls whether low
-        // 5 bits of $D40F are used. When OFF, original hardware masks them.
-        // However, Type-C ROM (F-BASIC) doesn't set this flag and expects
-        // FM-7 compatible full-range offsets. Since our software scroll
-        // always needs the full offset value to rotate correctly, we skip
-        // the masking entirely — it only matters for hardware scroll which
-        // we don't use in the renderer.
-        // (The masking would only be needed for a true hardware scroll
-        // implementation where the offset directly controls display start.)
-        const high = (this._pendingOffsetHigh !== undefined)
-            ? this._pendingOffsetHigh : (this.vramOffset[pg] & 0x3F00);
-        this._pendingOffsetHigh = undefined;
-        const newOffset = high | value;
+        // FM-7 Type-C: only bits 7-5 of low byte are used (mask $E0)
+        // FM77AV with vram_offset_flag: full 8 bits
+        // FM77AV without flag: same $E0 mask as FM-7
+        if (!this.isAV || !this.vramOffsetFlag) {
+            value &= 0xE0;
+        }
+        let offset = (this.vramOffset[pg] & 0x3F00);  // keep existing high byte
+        offset |= value;
+        this.vramOffset[pg] = offset;
+        this._pushScrollTrace('D40F', { val: value });
+        this._scrollCountUp(pg);
+    }
 
-        // Software scroll: physically rotate VRAM data so the sub CPU's
-        // fixed addresses always match screen positions. Used by both FM-7
-        // and FM77AV in BASIC/Type-C mode.
-        // FM-7 ROM sends the same offset each scroll (workRam reset makes it
-        // re-calculate from 0). FM77AV ROM sends cumulative offsets.
-        // Use _scrollApplied to track cumulative rotation for FM77AV only.
-        if (!this._scrollApplied) this._scrollApplied = [0, 0];
-        const oldOffset = this.isAV ? this._scrollApplied[pg] : this.vramOffset[pg];
-        const scrollAmount = (newOffset - oldOffset + PLANE_SIZE) % PLANE_SIZE;
+    /**
+     * Scroll counter: execute VRAM rotation only on even count.
+     * $D40E and $D40F are always written as a pair. The counter
+     * ensures scroll executes once per pair, not on each write.
+     * Matches real hardware behavior: scroll on register pair write.
+     */
+    _scrollCountUp(pg) {
+        this._vramOffsetCount[pg]++;
+        if ((this._vramOffsetCount[pg] & 1) === 0) {
+            // Pass raw difference as WORD (16-bit), masking done in _vramScroll
+            const diff = (this.vramOffset[pg] - this.crtcOffset[pg]) & 0xFFFF;
+            this._vramScroll(diff);
+            this.crtcOffset[pg] = this.vramOffset[pg];
+            this._fullDirty = true;
+        }
+    }
 
-        if (scrollAmount > 0 && scrollAmount < PLANE_SIZE / 2) {
-            const vram = this._getActiveVram();
+    /**
+     * Physically rotate VRAM data by 'offset' bytes (active page only).
+     * 640x200: 3 planes × 0x4000 each, wraps at 0x3FFF.
+     * 320x200: 6 sub-planes × 0x2000 each, wraps at 0x1FFF.
+     */
+    _vramScroll(offset) {
+        const vram = this._getActiveVram();
+        this._pushScrollTrace('SCROLL', { diff: offset & 0xFFFF });
+
+        if (this.displayMode === DISPLAY_MODE_320) {
+            // 320x200: rotate 6 independent sub-planes (each 0x2000)
+            const HALF = 0x2000;
+            offset &= (HALF - 1);
+            if (offset === 0) return;
+            const temp = new Uint8Array(offset);
+            for (let sp = 0; sp < 6; sp++) {
+                const base = sp * HALF;
+                for (let i = 0; i < offset; i++) temp[i] = vram[base + i];
+                for (let i = 0; i < HALF - offset; i++) {
+                    vram[base + i] = vram[base + offset + i];
+                }
+                for (let i = 0; i < offset; i++) {
+                    vram[base + HALF - offset + i] = temp[i];
+                }
+            }
+        } else {
+            // 640x200: rotate 3 planes (each 0x4000)
+            offset &= (PLANE_SIZE - 1);
+            if (offset === 0) return;
+            const temp = new Uint8Array(offset);
             for (let plane = 0; plane < 3; plane++) {
                 const base = plane * PLANE_SIZE;
-                const temp = new Uint8Array(scrollAmount);
-                for (let i = 0; i < scrollAmount; i++) {
-                    temp[i] = vram[base + ((oldOffset + i) % PLANE_SIZE)];
+                for (let i = 0; i < offset; i++) temp[i] = vram[base + i];
+                for (let i = 0; i < PLANE_SIZE - offset; i++) {
+                    vram[base + i] = vram[base + offset + i];
                 }
-                for (let i = 0; i < PLANE_SIZE - scrollAmount; i++) {
-                    const src = (oldOffset + scrollAmount + i) % PLANE_SIZE;
-                    const dst = (oldOffset + i) % PLANE_SIZE;
-                    vram[base + dst] = vram[base + src];
-                }
-                for (let i = 0; i < scrollAmount; i++) {
-                    const dst = (oldOffset + PLANE_SIZE - scrollAmount + i) % PLANE_SIZE;
-                    vram[base + dst] = temp[i];
+                for (let i = 0; i < offset; i++) {
+                    vram[base + PLANE_SIZE - offset + i] = temp[i];
                 }
             }
         }
-
-        // Track cumulative rotation; keep display offset at 0
-        this._scrollApplied[pg] = newOffset;
-        this.vramOffset[pg] = 0;
-
-        // Reset the sub CPU's software mirror of the offset.
-        // FM-7 ROM re-calculates from 0 each scroll, so we must reset.
-        // FM77AV ROM sends cumulative offsets based on work RAM, so
-        // resetting would break the next scroll (ROM would re-send the
-        // same value, giving scrollAmount=0).
-        if (this.workRam && !this.isAV) {
-            this.workRam[0x101F] = 0;
-            this.workRam[0x1020] = 0;
-        }
-
-        this._fullDirty = true;
     }
 
     /** Get the display page's VRAM offset (for rendering) */
     getDisplayVramOffset() {
-        return this.vramOffset[this.displayVramPage];
+        // VRAM data is physically rotated by _vramScroll(), so the
+        // renderer always reads from offset 0. The register value
+        // (vramOffset) is only used for differential scroll calculation.
+        return 0;
     }
 
     // ---------------------------------------------------------------
@@ -1081,6 +1150,7 @@ export class Display {
         page &= 1;
         if (this.activeVramPage !== page) {
             this.activeVramPage = page;
+            this._pushScrollTrace('APG');
         }
     }
 
@@ -1088,6 +1158,7 @@ export class Display {
         page &= 1;
         if (this.displayVramPage !== page) {
             this.displayVramPage = page;
+            this._pushScrollTrace('DPG');
             this._fullDirty = true;
         }
     }
@@ -1096,6 +1167,7 @@ export class Display {
         if (this.displayMode !== mode) {
             this.displayMode = mode;
             this._fullDirty = true;
+            this._pushScrollTrace('MODE');
         }
     }
 
@@ -1233,16 +1305,8 @@ export class Display {
         // 40 bytes per line, 8 pixels per byte, each pixel doubled on 640-wide display
         // 12 sub-planes of 0x2000 bytes each, spread across both VRAM pages
         //
-        // Sub-plane layout (verified against reference renderer):
-        // Base = page1 offset 0 (vram_c + 0xC000 in contiguous layout)
-        //   b0 = page0[0x0000+ofs]  b1 = page0[0x2000+ofs]  (Blue: page0 B plane halves)
-        //   b2 = page1[0x0000+ofs]  b3 = page1[0x2000+ofs]  (Blue: page1 B plane halves)
-        //   r0 = page0[0x4000+ofs]  r1 = page0[0x6000+ofs]  (Red:  page0 R plane halves)
-        //   r2 = page1[0x4000+ofs]  r3 = page1[0x6000+ofs]  (Red:  page1 R plane halves)
-        //   g0 = page0[0x8000+ofs]  g1 = page0[0xA000+ofs]  (Green: page0 G plane halves)
-        //   g2 = page1[0x8000+ofs]  g3 = page1[0xA000+ofs]  (Green: page1 G plane halves)
-        //
-        // Palette index: g0<<11 | g1<<10 | g2<<9 | g3<<8 | r0<<7 | r1<<6 | r2<<5 | r3<<4 | b0<<3 | b1<<2 | b2<<1 | b3
+        // Both pages physically rotated by their own vramOffset in _vramScroll.
+        // Renderer reads from offset 0.
 
         const HALF_PLANE = 0x2000;
 
@@ -1376,7 +1440,7 @@ export class Display {
         this.clearWorkRam();
         this.resetPalette();
         this.vramOffset = [0, 0];
-        this._scrollApplied = [0, 0];
+        this.crtcOffset = [0, 0];
         this._vramOffsetCount = [0, 0];
         this.vramOffsetFlag = false;
         this.crtOn = false;
