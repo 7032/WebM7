@@ -19,8 +19,6 @@ const OPN_EXT_CLOCK_AV = 2457600;   // YM2203 external clock on FM77AV (4.9152 M
 const CPU_CLOCK_AV     = 2000000;   // FM77AV CPU clock (2 MHz)
 const OPN_CPU_RATIO_AV = OPN_EXT_CLOCK_AV / CPU_CLOCK_AV;  // 1.2288
 const SAMPLE_RATE   = 48000;
-const BUF_SIZE      = 16384;
-const BUF_MASK      = BUF_SIZE - 1;
 
 const NUM_CHANNELS  = 3;
 
@@ -1055,12 +1053,12 @@ export class OPN {
 
         // Audio output
         this._audioCtx = null;
-        this._scriptNode = null;
+        this._workletNode = null;
         this._gainNode = null;
         this._volume = 0.5;
-        this._ringBuf = new Float32Array(BUF_SIZE);
-        this._wPos = 0;
-        this._rPos = 0;
+        // Sample staging buffer (see psg.js for the same pattern)
+        this._sampleBuf = new Float32Array(2048);
+        this._sampleLen = 0;
 
         // CPU cycles accumulator — step() receives CPU cycles,
         // not OPN clock cycles, so use CPU clock for sample timing.
@@ -1194,9 +1192,7 @@ export class OPN {
         this._rcnt = 0;
         for (let i = 0; i < 3; i++) this._rbuf[i].fill(0);
 
-        this._wPos = 0;
-        this._rPos = 0;
-        this._ringBuf.fill(0);
+        this._sampleLen = 0;
     }
 
     // =========================================================================
@@ -1487,18 +1483,33 @@ export class OPN {
         this._fmAccum += cpuCycles;
         const cps = this._cyclesPerSample;
 
+        let len = this._sampleLen;
+        let buf = this._sampleBuf;
+        const tmp = [0];
         while (this._fmAccum >= cps) {
             this._fmAccum -= cps;
+            this._renderSamples(tmp, 1);
+            if (len >= buf.length) {
+                const grown = new Float32Array(buf.length * 2);
+                grown.set(buf);
+                this._sampleBuf = buf = grown;
+            }
+            buf[len++] = tmp[0] / 32768.0;
+        }
+        this._sampleLen = len;
 
-            // Generate one sample
-            const buf = [0];
-            this._renderSamples(buf, 1);
-
-            // Convert to float (-1..1 range)
-            const sample = buf[0] / 32768.0;
-
-            this._ringBuf[this._wPos] = sample;
-            this._wPos = (this._wPos + 1) & BUF_MASK;
+        // Batch flush — see psg.js for the same pattern.
+        if (this._workletNode) {
+            const FLUSH_SIZE = 1024;
+            while (this._sampleLen >= FLUSH_SIZE) {
+                const chunk = this._sampleBuf.slice(0, FLUSH_SIZE);
+                this._workletNode.port.postMessage(
+                    { type: 'samples', data: chunk },
+                    [chunk.buffer],
+                );
+                this._sampleBuf.copyWithin(0, FLUSH_SIZE, this._sampleLen);
+                this._sampleLen -= FLUSH_SIZE;
+            }
         }
     }
 
@@ -1517,23 +1528,27 @@ export class OPN {
             this._gainNode.gain.value = this._volume;
             this._gainNode.connect(this._audioCtx.destination);
 
-            this._scriptNode = this._audioCtx.createScriptProcessor(1024, 0, 1);
-            this._scriptNode.onaudioprocess = (ev) => {
-                const buf = ev.outputBuffer.getChannelData(0);
-                let rp = this._rPos;
-                const wp = this._wPos;
-                for (let i = 0; i < buf.length; i++) {
-                    if (rp !== wp) {
-                        buf[i] = this._ringBuf[rp];
-                        rp = (rp + 1) & BUF_MASK;
-                    } else {
-                        // Underrun: hold last known sample to avoid clicks
-                        buf[i] = (i > 0) ? buf[i - 1] : 0;
-                    }
-                }
-                this._rPos = rp;
-            };
-            this._scriptNode.connect(this._gainNode);
+            // AudioWorkletNode replaces ScriptProcessorNode (deprecated).
+            // See psg.js for the same pattern. Module load is async; node
+            // is wired up once ready and step() drops samples until then.
+            this._audioCtx.audioWorklet
+                .addModule('./js/audio-worklet-processor.js')
+                .then(() => {
+                    this._workletNode = new AudioWorkletNode(
+                        this._audioCtx,
+                        'ring-buffer-processor',
+                        {
+                            numberOfInputs: 0,
+                            numberOfOutputs: 1,
+                            outputChannelCount: [1],
+                        },
+                    );
+                    this._workletNode.connect(this._gainNode);
+                    console.log('OPN: AudioWorklet ready (' + this._audioCtx.sampleRate + ' Hz)');
+                })
+                .catch((e) => {
+                    console.warn('OPN: AudioWorklet load failed:', e);
+                });
 
             console.log('OPN: audio started (' + this._audioCtx.sampleRate + ' Hz)');
         } catch (e) {
@@ -1555,9 +1570,9 @@ export class OPN {
     }
 
     stopAudio() {
-        if (this._scriptNode) {
-            this._scriptNode.disconnect();
-            this._scriptNode = null;
+        if (this._workletNode) {
+            this._workletNode.disconnect();
+            this._workletNode = null;
         }
         if (this._gainNode) {
             this._gainNode.disconnect();

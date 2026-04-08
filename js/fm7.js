@@ -160,11 +160,11 @@ export class FM7 {
         this._blankFlag       = false;   // TRUE=horizontal blanking active
         this._vblankCycles    = 0;       // Cycle counter for VBlank period
         this._subNmiDelay     = 0;       // Cycles to delay NMI after sub CPU reset (INTR_SLOAD emulation)
-        // RTC (MS58321) via key encoder ($D431/$D432)
-        this._rtcRxBuf = [];      // Receive buffer (sub CPU reads $D431)
+        // FM77AV key encoder MCU at sub $D431/$D432 (see _keyEncProcessByte)
+        this._rtcRxBuf = [];      // Sub-side response buffer (read via $D431)
         this._rtcAck = false;     // ACK flag (cleared on $D432 read)
-        this._rtcCmdBuf = [];     // Command accumulator
-        this._rtcState = 0;       // Protocol state
+        this._keyEncSendBuf = []; // MCU command FIFO (write via $D431)
+        this._keyEncFormat = 0;   // 0=9BIT FM-7 ASCII, 1=FM16β, 2=SCAN
 
         // BEEP
         this._beepOsc = null;
@@ -460,6 +460,16 @@ export class FM7 {
                 this._opnIrqLatch = false;
             }
             return status;
+        }
+
+        // $FD17: Extended IRQ status (active low, FM77AV)
+        // bit 3 (0x08): OPN timer A or B IRQ pending
+        // bit 2 (0x04): PTM (mouse) IRQ pending
+        if (addr === 0xFD17) {
+            let val = 0xFF;
+            if (this._opnIrqLatch) val &= ~0x08;
+            // PTM not implemented; bit 2 stays high
+            return val;
         }
 
         // $FD04: Sub CPU status (BUSY, attention, break key)
@@ -804,19 +814,23 @@ export class FM7 {
             this._subHaltRequest = false;
             this._subCancelRequest = false;
 
-            // Keyboard mode: Type-A/B ROMs have internal scan-to-ASCII
-            // conversion, so the keyboard sends scan codes. Type-C ROM
-            // expects pre-converted ASCII codes (FM-7 compatible).
-            if (bank === SUB_MONITOR_C) {
-                // FM77AV games that switch to Type-C for 640x200/320x200
-                // still use scan codes + break codes for input (the keyboard
-                // encoder hardware doesn't change with the sub ROM bank).
-                // Only F-BASIC BASIC boot genuinely needs ASCII mode.
-                this.keyboard._useScanCodes = true;
-                this.keyboard._enableBreakCodes = true;
-            } else {
-                this.keyboard._useScanCodes = true;
-                this.keyboard._enableBreakCodes = true;
+            // Sub ROM bank → keyboard MCU mode mapping.
+            // Empirically: native FM77AV games that run with Type-A use
+            // 9BIT/ASCII (e.g. BUG08, BUG10). Games that switch to Type-C
+            // (often for 320x200 mode) hard-code FM77AV scan codes in
+            // their key tables (e.g. BUG04). Reset the keyboard MCU
+            // accordingly when the bank changes, unless the game has
+            // already issued an explicit $D431 mode command this session.
+            if (!this._keyEncFormatExplicit) {
+                if (bank === SUB_MONITOR_C) {
+                    this.keyboard._useScanCodes = true;
+                    this.keyboard._enableBreakCodes = true;
+                    this._keyEncFormat = 2;
+                } else {
+                    this.keyboard._useScanCodes = false;
+                    this.keyboard._enableBreakCodes = false;
+                    this._keyEncFormat = 0;
+                }
             }
 
             this.subCPU.reset();
@@ -1291,9 +1305,9 @@ export class FM7 {
                 this.display.miscReg = val;
                 return;
             }
-            // $D431: Key encoder data send — RTC commands from sub CPU
+            // $D431: Key encoder MCU command interface (multi-protocol)
             if (addr === 0xD431) {
-                this._rtcProcessCommand(val);
+                this._keyEncProcessByte(val);
                 return;
             }
             // $D432: Key encoder status (read-only, writes ignored)
@@ -1461,13 +1475,20 @@ export class FM7 {
         // Do NOT include fdc.irqFlag in mainIrq.
 
         // OPN Timer IRQ: routed through $FD03 bit3 "extended interrupt"
-        // (FM7 Programmers Guide §3.1). Edge-triggered latch: set on new
-        // OPN timer overflow, cleared by reading $FD03. This prevents the
-        // level-triggered OPN status flag from causing continuous IRQ re-entry.
+        // (FM7 Programmers Guide §3.1). The IRQ source is the OPN status
+        // bits 0/1 (Timer A/B overflow). The game's IRQ handler clears
+        // these by writing OPN register $27 with reset bits ($10/$20).
+        // Edge-triggered latch: set on new OPN timer overflow, auto-clears
+        // when the underlying OPN status bits clear. The latch is also
+        // cleared by reading $FD03. (Either path is sufficient.)
         if (this._fmCardEnabled) {
             const opnActive = (this.opn.timerAFlag && this.opn._timerAIRQ) ||
                               (this.opn.timerBFlag && this.opn._timerBIRQ);
             if (opnActive && !this._opnIrqPrev) this._opnIrqLatch = true;
+            // Auto-clear when the OPN side has dropped both flags. Without
+            // this, a game whose IRQ handler resets timers via OPN reg $27
+            // (without ever reading $FD03) would experience an IRQ storm.
+            if (!opnActive) this._opnIrqLatch = false;
             this._opnIrqPrev = opnActive;
             if (this._opnIrqLatch) mainIrq = true;
         }
@@ -1966,19 +1987,16 @@ export class FM7 {
             this.display.analogPalette = this._analogPalette;
             // Enable FM77AV features in display (ALU, line drawing)
             this.display.isAV = true;
-            // Keyboard mode depends on boot mode:
-            //   BASIC (Type-C): ASCII codes, no break codes — F-BASIC expects ASCII
-            //   DOS (Type-C display): scan codes + break codes — FM77AV games
-            //     expect scan codes at $FD01 (designed for Type-A).
-            //     $FD01 reads directly from keyboard module, not through sub CPU,
-            //     so Type-C sub ROM doesn't interfere with scan code delivery.
-            if (bootMode === 'dos') {
-                this.keyboard._enableBreakCodes = true;
-                this.keyboard._useScanCodes = true;
-            } else {
-                this.keyboard._enableBreakCodes = false;
-                this.keyboard._useScanCodes = false;
-            }
+            // Keyboard MCU power-on default = KEY_FORMAT_9BIT (FM-7
+            // compatible ASCII, no break codes). Native FM77AV games
+            // that need scan codes explicitly switch by writing cmd
+            // $00 with data $02 to the MCU at $D431. The sub ROM bank
+            // handler may also adjust the mode when the game switches
+            // to Type-C (see $FD13 write handler).
+            this.keyboard._enableBreakCodes = false;
+            this.keyboard._useScanCodes = false;
+            this._keyEncFormat = 0;
+            this._keyEncFormatExplicit = false;
         } else {
             this._initiatorActive = false;
             this._subMonitorType = SUB_MONITOR_C;
@@ -2003,14 +2021,12 @@ export class FM7 {
         this.scheduler.reset();
 
         // Re-apply keyboard mode after component reset (components may clear it)
+        // Default = KEY_FORMAT_9BIT (FM-7 ASCII). Games switch via $D431.
         if (this.isFM77AV) {
-            if (bootMode === 'dos') {
-                this.keyboard._enableBreakCodes = true;
-                this.keyboard._useScanCodes = true;
-            } else {
-                this.keyboard._enableBreakCodes = false;
-                this.keyboard._useScanCodes = false;
-            }
+            this.keyboard._enableBreakCodes = false;
+            this.keyboard._useScanCodes = false;
+            this._keyEncFormat = 0;
+            this._keyEncFormatExplicit = false;
         }
 
         // =====================================================================
@@ -2456,11 +2472,115 @@ export class FM7 {
     // =========================================================================
 
     /**
-     * Process a command byte sent by sub CPU to key encoder ($D431 write).
-     * The RTC is accessed through a simple serial protocol:
-     * - Command $00: reset
-     * - Command $01-$0C: read RTC register (returns BCD nibble)
-     * - Command $11-$1C: write RTC register
+     * Process a byte written to the FM77AV key encoder MCU at sub address
+     * $D431. The MCU exposes a multi-protocol command interface with a
+     * 16-byte send FIFO. The first byte is the command, subsequent bytes
+     * are arguments.
+     *
+     * Supported commands:
+     *   $00 +1: code system switch (0=9BIT FM-7 ASCII, 1=FM16β, 2=SCAN)
+     *   $01:    get current code system → 1 byte response
+     *   $02 +1: LED set (stub)
+     *   $03:    LED get (stub)
+     *   $04 +1: key repeat enable (stub)
+     *   $05 +2: key repeat time (stub)
+     *   $80 +1: RTC sub-protocol
+     *           sub=0: get RTC → 7-byte BCD response
+     *           sub=1 +7: set RTC (we ignore set; host clock is read-only)
+     *   $81-$84: digitize / screen mode / brightness (stubs)
+     *
+     * The reset/power-on default is KEY_FORMAT_9BIT (FM-7 compatible
+     * ASCII with no break codes). Games that need scan codes (e.g. native
+     * FM77AV titles) issue command $00 with data $02 to switch.
+     */
+    _keyEncProcessByte(val) {
+        if (!this._keyEncSendBuf) this._keyEncSendBuf = [];
+        const buf = this._keyEncSendBuf;
+        if (buf.length >= 16) {
+            buf.length = 0;
+        }
+        buf.push(val);
+
+        const finishCmd = () => {
+            this._keyEncSendBuf.length = 0;
+            this._rtcAck = true; // ACK after command processed (5 us in real HW)
+        };
+
+        switch (buf[0]) {
+            case 0x00: // Code system switch
+                if (buf.length >= 2) {
+                    const fmt = buf[1];
+                    if (fmt === 0x02) { // SCAN
+                        this.keyboard._useScanCodes = true;
+                        this.keyboard._enableBreakCodes = true;
+                    } else { // 0=9BIT FM-7, 1=FM16β both → ASCII-style
+                        this.keyboard._useScanCodes = false;
+                        this.keyboard._enableBreakCodes = false;
+                    }
+                    this._keyEncFormat = fmt;
+                    this._keyEncFormatExplicit = true; // game has chosen
+                    finishCmd();
+                }
+                return;
+            case 0x01: // Get code system
+                this._rtcRxBuf.push(this._keyEncFormat || 0);
+                finishCmd();
+                return;
+            case 0x02: // LED set
+            case 0x04: // Repeat enable
+                if (buf.length >= 2) finishCmd();
+                return;
+            case 0x03: // LED get
+                this._rtcRxBuf.push(0);
+                finishCmd();
+                return;
+            case 0x05: // Repeat time
+                if (buf.length >= 3) finishCmd();
+                return;
+            case 0x80: // RTC sub-protocol
+                if (buf.length >= 2) {
+                    if (buf[1] === 0x00) { // get
+                        this._rtcEmitGet();
+                        finishCmd();
+                    } else if (buf[1] === 0x01) { // set (need 9 bytes total)
+                        if (buf.length >= 9) finishCmd();
+                    } else {
+                        finishCmd();
+                    }
+                }
+                return;
+            case 0x81: // Digitize
+            case 0x82: // Screen mode set
+            case 0x84: // Screen brightness
+                if (buf.length >= 2) finishCmd();
+                return;
+            case 0x83: // Screen mode get
+                this._rtcRxBuf.push(0);
+                finishCmd();
+                return;
+            default:
+                finishCmd();
+                return;
+        }
+    }
+
+    /** Emit current host time as a 7-byte BCD response in _rtcRxBuf. */
+    _rtcEmitGet() {
+        const now = new Date();
+        const bcd = (n) => ((Math.floor(n / 10) << 4) | (n % 10)) & 0xFF;
+        // RTC response: sec, min, hour, weekday, day, month, year (7 bytes BCD)
+        this._rtcRxBuf.push(bcd(now.getSeconds()));
+        this._rtcRxBuf.push(bcd(now.getMinutes()));
+        this._rtcRxBuf.push(bcd(now.getHours()));
+        this._rtcRxBuf.push(now.getDay() & 0xFF);
+        this._rtcRxBuf.push(bcd(now.getDate()));
+        this._rtcRxBuf.push(bcd(now.getMonth() + 1));
+        this._rtcRxBuf.push(bcd(now.getFullYear() % 100));
+    }
+
+    /**
+     * Legacy stub kept for any code path that still calls it. The new
+     * keyboard MCU command interface handles RTC via cmd $80.
      */
     _rtcProcessCommand(val) {
         // Simple implementation: respond to RTC read commands

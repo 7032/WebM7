@@ -18,8 +18,6 @@ const PSG_CLOCK     = 1228800;       // 1.2288 MHz
 const CLOCK_DIV     = 8;             // Internal divider for tone/noise
 const ENV_DIV       = CLOCK_DIV * 2; // Envelope runs at half the tone rate
 const SAMPLE_RATE   = 48000;
-const BUF_SIZE      = 16384;         // Ring buffer (must be power of 2)
-const BUF_MASK      = BUF_SIZE - 1;
 
 // AY-3-8910 logarithmic volume table (measured from real chip)
 const VOL = new Float32Array([
@@ -58,12 +56,14 @@ export class PSG {
 
         // --- Audio output ---
         this._audioCtx    = null;
-        this._scriptNode  = null;
+        this._workletNode = null;
         this._gainNode    = null;
         this._volume      = 0.5;          // Default 50%
-        this._ringBuf     = new Float32Array(BUF_SIZE);
-        this._wPos        = 0;
-        this._rPos        = 0;
+        // Sample staging buffer for the current step() call. Resized as
+        // needed; flushed (transferred) to the AudioWorklet at the end of
+        // each step() so the audio thread always has fresh data.
+        this._sampleBuf   = new Float32Array(2048);
+        this._sampleLen   = 0;
 
         // --- Clock accumulator ---
         this._accum             = 0;
@@ -102,9 +102,7 @@ export class PSG {
         this._envHolding = false;
 
         this._accum = 0;
-        this._wPos  = 0;
-        this._rPos  = 0;
-        this._ringBuf.fill(0);
+        this._sampleLen = 0;
     }
 
     // =====================================================================
@@ -192,11 +190,38 @@ export class PSG {
         this._accum += cpuCycles * this._cpuToPsgRatio / CLOCK_DIV;
         const tps = this._ticksPerSample;
 
+        let len = this._sampleLen;
+        let buf = this._sampleBuf;
         while (this._accum >= tps) {
             this._accum -= tps;
             this._advance(tps);
-            this._ringBuf[this._wPos] = this._mix();
-            this._wPos = (this._wPos + 1) & BUF_MASK;
+            if (len >= buf.length) {
+                // Grow staging buffer (rare; emulator catches up after pause)
+                const grown = new Float32Array(buf.length * 2);
+                grown.set(buf);
+                this._sampleBuf = buf = grown;
+            }
+            buf[len++] = this._mix();
+        }
+        this._sampleLen = len;
+
+        // Flush in chunks of FLUSH_SIZE samples. step() runs per CPU
+        // instruction (hundreds of thousands of times per second) so
+        // posting on every call would saturate the message channel and
+        // cause audible crackling. 1024 samples ≈ 21ms at 48 kHz, which
+        // is a reasonable trade-off between latency and overhead.
+        if (this._workletNode) {
+            const FLUSH_SIZE = 1024;
+            while (this._sampleLen >= FLUSH_SIZE) {
+                const chunk = this._sampleBuf.slice(0, FLUSH_SIZE);
+                this._workletNode.port.postMessage(
+                    { type: 'samples', data: chunk },
+                    [chunk.buffer],
+                );
+                // Shift remaining samples down
+                this._sampleBuf.copyWithin(0, FLUSH_SIZE, this._sampleLen);
+                this._sampleLen -= FLUSH_SIZE;
+            }
         }
     }
 
@@ -319,25 +344,27 @@ export class PSG {
             this._gainNode.gain.value = this._volume;
             this._gainNode.connect(this._audioCtx.destination);
 
-            // ScriptProcessorNode pulls from the ring buffer
-            // Use 1024 samples (~21ms) for lower latency at game start
-            this._scriptNode = this._audioCtx.createScriptProcessor(1024, 0, 1);
-            this._scriptNode.onaudioprocess = (ev) => {
-                const buf = ev.outputBuffer.getChannelData(0);
-                let rp = this._rPos;
-                const wp = this._wPos;
-                for (let i = 0; i < buf.length; i++) {
-                    if (rp !== wp) {
-                        buf[i] = this._ringBuf[rp];
-                        rp = (rp + 1) & BUF_MASK;
-                    } else {
-                        // Underrun: hold last known sample to avoid clicks
-                        buf[i] = (i > 0) ? buf[i - 1] : 0;
-                    }
-                }
-                this._rPos = rp;
-            };
-            this._scriptNode.connect(this._gainNode);
+            // AudioWorkletNode replaces ScriptProcessorNode (deprecated).
+            // Module load is async; node is wired up once ready. Until then
+            // step() drops samples (audible only as a brief silence at boot).
+            this._audioCtx.audioWorklet
+                .addModule('./js/audio-worklet-processor.js')
+                .then(() => {
+                    this._workletNode = new AudioWorkletNode(
+                        this._audioCtx,
+                        'ring-buffer-processor',
+                        {
+                            numberOfInputs: 0,
+                            numberOfOutputs: 1,
+                            outputChannelCount: [1],
+                        },
+                    );
+                    this._workletNode.connect(this._gainNode);
+                    console.log('PSG: AudioWorklet ready (' + this._audioCtx.sampleRate + ' Hz)');
+                })
+                .catch((e) => {
+                    console.warn('PSG: AudioWorklet load failed:', e);
+                });
 
             console.log('PSG: audio started (' + this._audioCtx.sampleRate + ' Hz)');
         } catch (e) {
@@ -367,9 +394,9 @@ export class PSG {
     getVolume() { return this._volume; }
 
     stopAudio() {
-        if (this._scriptNode) {
-            this._scriptNode.disconnect();
-            this._scriptNode = null;
+        if (this._workletNode) {
+            this._workletNode.disconnect();
+            this._workletNode = null;
         }
         if (this._gainNode) {
             this._gainNode.disconnect();

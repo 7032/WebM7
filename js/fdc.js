@@ -780,18 +780,21 @@ export class FDC {
         this.stepDirection = -1;
         const pos = this.headPosition[this.currentDrive];
         if (pos === 0) {
-            // Already at track 0
+            // Already at track 0. Real WD279x still asserts BUSY briefly
+            // before completing; some games poll the status register
+            // waiting to observe BUSY=1 first (e.g. `LDA $FD18; ASRA;
+            // BCC loop`) and would deadlock on instant completion. Defer
+            // the completion via SEEK_VERIFY (a "delay then complete"
+            // state). Use a minimal delay (200 cycles ≈ 100µs) — enough
+            // for the polling loop to see one BUSY=1 sample, but not
+            // enough to perturb the loader timing of other games.
             this.trackReg = 0;
             this.headPosition[this.currentDrive] = 0;
-            if (this.cmdFlags.v) {
-                this.state = FDC_STATE.SEEK_VERIFY;
-                this.delayCycles = 30000; // 15ms verify delay
-            } else {
-                this._completeTypeI();
-            }
+            this.delayCycles = this.cmdFlags.v ? 30000 : 200;
+            this.state = FDC_STATE.SEEK_VERIFY;
         } else {
             // Step toward track 0
-            this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2; // Convert us to 2MHz cycles
+            this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
             this.state = FDC_STATE.SEEK_STEPPING;
         }
     }
@@ -804,13 +807,12 @@ export class FDC {
         // The BIOS may write 0 to trackReg before Seek (absolute positioning),
         // but the physical head is already at the correct track.
         if (target === headPos) {
+            // Already at target. Defer completion so polling loops that
+            // wait for BUSY=1 can observe the transient (see comment in
+            // _beginSeekRestore). Use a minimal 200-cycle delay.
             this.trackReg = target;
-            if (this.cmdFlags.v) {
-                this.state = FDC_STATE.SEEK_VERIFY;
-                this.delayCycles = 30000;
-            } else {
-                this._completeTypeI();
-            }
+            this.delayCycles = this.cmdFlags.v ? 30000 : 200;
+            this.state = FDC_STATE.SEEK_VERIFY;
             return;
         }
 
