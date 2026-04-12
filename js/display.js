@@ -66,6 +66,9 @@ export class Display {
         this._vramBuf1 = new ArrayBuffer(VRAM_SIZE);
         this.vramPage1 = new Uint8Array(this._vramBuf1);
 
+        // Temporary buffer for VRAM scroll rotation (max plane size)
+        this._scrollBuf = new Uint8Array(PLANE_SIZE);
+
         // Sub CPU work RAM: $C000-$D37F (5KB) + $D500-$D7FF (768 bytes, FM77AV only)
         this._workBuf = new ArrayBuffer(0x1680);  // 0x1380 + 0x0300
         this.workRam = new Uint8Array(this._workBuf);
@@ -147,6 +150,7 @@ export class Display {
         this._lineMask    = 0xFF;    // Current line drawing mask byte
         this._lineCount   = 0;       // Bytes processed during line draw
         this._lineCountSub = 0;      // Sub-byte counter for busy time
+        this._lineBusyMicros = 0;    // BUSY timer countdown (microseconds); cleared by fm7.js
 
         // MISC register ($D430) readback value (maintained by fm7.js)
         this.miscReg = 0;
@@ -695,11 +699,7 @@ export class Display {
 
         if (busyTime > 0) {
             this.lineBusy = true;
-            // In a real emulator we'd schedule an event to clear this.
-            // For our web emulator, we clear it immediately since we
-            // don't have cycle-accurate timing for line drawing.
-            // Software that polls $D430 bit 4 will see it clear.
-            this.lineBusy = false;
+            this._lineBusyMicros = busyTime;  // fm7.js scheduler clears this after timeout
         }
     }
 
@@ -1093,52 +1093,43 @@ export class Display {
 
     /**
      * Physically rotate VRAM data by 'offset' bytes (active page only).
-     * 640x200: 3 planes × 0x4000 each, wraps at 0x3FFF.
-     * 320x200: 6 sub-planes × 0x2000 each, wraps at 0x1FFF.
+     * After rotation, VRAM[0] = screen top. Renderer always reads from 0.
      */
     _vramScroll(offset) {
-        const vram = this._getActiveVram();
         this._pushScrollTrace('SCROLL', { diff: offset & 0xFFFF });
 
+        const vram = this._getActiveVram();
+        const buf = this._scrollBuf;
+
         if (this.displayMode === DISPLAY_MODE_320) {
-            // 320x200: rotate 6 independent sub-planes (each 0x2000)
+            // 320x200 analog: 6 sub-planes of 0x2000 each
             const HALF = 0x2000;
             offset &= (HALF - 1);
             if (offset === 0) return;
-            const temp = new Uint8Array(offset);
-            for (let sp = 0; sp < 6; sp++) {
-                const base = sp * HALF;
-                for (let i = 0; i < offset; i++) temp[i] = vram[base + i];
-                for (let i = 0; i < HALF - offset; i++) {
-                    vram[base + i] = vram[base + offset + i];
-                }
-                for (let i = 0; i < offset; i++) {
-                    vram[base + HALF - offset + i] = temp[i];
-                }
+            for (let i = 0; i < 6; i++) {
+                const base = i * HALF;
+                buf.set(vram.subarray(base, base + offset));
+                vram.copyWithin(base, base + offset, base + HALF);
+                vram.set(buf.subarray(0, offset), base + HALF - offset);
             }
         } else {
-            // 640x200: rotate 3 planes (each 0x4000)
+            // 640x200 8-color: 3 planes of 0x4000 each
             offset &= (PLANE_SIZE - 1);
             if (offset === 0) return;
-            const temp = new Uint8Array(offset);
-            for (let plane = 0; plane < 3; plane++) {
-                const base = plane * PLANE_SIZE;
-                for (let i = 0; i < offset; i++) temp[i] = vram[base + i];
-                for (let i = 0; i < PLANE_SIZE - offset; i++) {
-                    vram[base + i] = vram[base + offset + i];
-                }
-                for (let i = 0; i < offset; i++) {
-                    vram[base + PLANE_SIZE - offset + i] = temp[i];
-                }
+            for (let i = 0; i < 3; i++) {
+                const base = i * PLANE_SIZE;
+                buf.set(vram.subarray(base, base + offset));
+                vram.copyWithin(base, base + offset, base + PLANE_SIZE);
+                vram.set(buf.subarray(0, offset), base + PLANE_SIZE - offset);
             }
         }
+        this._fullDirty = true;
     }
 
     /** Get the display page's VRAM offset (for rendering) */
     getDisplayVramOffset() {
-        // VRAM data is physically rotated by _vramScroll(), so the
-        // renderer always reads from offset 0. The register value
-        // (vramOffset) is only used for differential scroll calculation.
+        // With physical rotation, VRAM[0] is always screen top.
+        // Renderer does not apply any offset.
         return 0;
     }
 
@@ -1176,11 +1167,17 @@ export class Display {
     // ---------------------------------------------------------------
 
     rebuildAnalogPalette(analogPalette) {
+        // Palette entry format (matches FM77AV hardware index layout):
+        //   bits 8-11: G level (written via $FD34)
+        //   bits 4-7:  R level (written via $FD33)
+        //   bits 0-3:  B level (written via $FD32)
+        // The renderer builds pixel indices with the same layout
+        // (G in high bits, R in middle, B in low bits).
         for (let i = 0; i < 4096; i++) {
             const entry = analogPalette[i];
-            const b4 = (entry >> 8) & 0x0F;
+            const g4 = (entry >> 8) & 0x0F;
             const r4 = (entry >> 4) & 0x0F;
-            const g4 = entry & 0x0F;
+            const b4 = entry & 0x0F;
             this._resolvedAnalogPalette[i] =
                 0xFF000000 | ((b4 * 17) << 16) | ((g4 * 17) << 8) | (r4 * 17);
         }
@@ -1232,7 +1229,6 @@ export class Display {
         const red   = displayVram;
         const green = displayVram;
         const pal   = this._resolvedPalette;
-        const offset = this.getDisplayVramOffset();
 
         for (let band = 0; band < 25; band++) {
             if (!needFull && !this._dirtyBands[band]) continue;
@@ -1241,11 +1237,12 @@ export class Display {
             const yEnd = Math.min(yStart + 8, SCREEN_HEIGHT);
 
             for (let y = yStart; y < yEnd; y++) {
-                const lineBase = ((y * BYTES_PER_LINE + offset) % PLANE_SIZE);
+                // VRAM is physically rotated so [0] = screen top
+                const lineBase = y * BYTES_PER_LINE;
                 const pixelRow = y * SCREEN_WIDTH;
 
                 for (let byteX = 0; byteX < BYTES_PER_LINE; byteX++) {
-                    const byteAddr = (lineBase + byteX) % PLANE_SIZE;
+                    const byteAddr = lineBase + byteX;
                     // multiPage bits 4-6: display mask (1=plane hidden)
                     const bByte = (this.multiPage & 0x10) ? 0 : blue [BLUE_BASE  + byteAddr];
                     const rByte = (this.multiPage & 0x20) ? 0 : red  [RED_BASE   + byteAddr];
@@ -1299,40 +1296,47 @@ export class Display {
         const page0 = this.vram;
         const page1 = this.vramPage1;
         const pal = this._resolvedAnalogPalette;
-        const offset = this.getDisplayVramOffset() & 0x1FFF;
 
         // FM77AV 320x200, 4096-color mode:
         // 40 bytes per line, 8 pixels per byte, each pixel doubled on 640-wide display
         // 12 sub-planes of 0x2000 bytes each, spread across both VRAM pages
-        //
-        // Both pages physically rotated by their own vramOffset in _vramScroll.
-        // Renderer reads from offset 0.
+        // NOTE: displayVramPage has NO effect in 320x200 mode — both pages are
+        // always read simultaneously to form the 12-bit colour index.
+        // VRAM is physically rotated by _vramScroll, so [0] = screen top.
 
-        const HALF_PLANE = 0x2000;
+        // Build display mask from multiPage bits 4-6:
+        //   bit 4 set → B display masked → bits 0-3 of palette idx forced to 0
+        //   bit 5 set → R display masked → bits 4-7 forced to 0
+        //   bit 6 set → G display masked → bits 8-11 forced to 0
+        let idxMask = 0xFFF;
+        if (this.multiPage & 0x10) idxMask &= ~0x00F;
+        if (this.multiPage & 0x20) idxMask &= ~0x0F0;
+        if (this.multiPage & 0x40) idxMask &= ~0xF00;
 
         for (let y = 0; y < SCREEN_HEIGHT; y++) {
-            const lineOfs = ((y * BYTES_PER_LINE_320 + offset) % HALF_PLANE);
+            const lineOfs = y * BYTES_PER_LINE_320;
             const pixelRow = y * SCREEN_WIDTH;
 
             for (let byteX = 0; byteX < BYTES_PER_LINE_320; byteX++) {
-                const ofs = (lineOfs + byteX) % HALF_PLANE;
+                const ofs0 = lineOfs + byteX;
+                const ofs1 = lineOfs + byteX;
 
                 // Read 12 sub-plane bytes (matching reference layout)
-                const b0 = page0[0x0000 + ofs];
-                const b1 = page0[0x2000 + ofs];
-                const r0 = page0[0x4000 + ofs];
-                const r1 = page0[0x6000 + ofs];
-                const g0 = page0[0x8000 + ofs];
-                const g1 = page0[0xA000 + ofs];
-                const b2 = page1[0x0000 + ofs];
-                const b3 = page1[0x2000 + ofs];
-                const r2 = page1[0x4000 + ofs];
-                const r3 = page1[0x6000 + ofs];
-                const g2 = page1[0x8000 + ofs];
-                const g3 = page1[0xA000 + ofs];
+                const b0 = page0[0x0000 + ofs0];
+                const b1 = page0[0x2000 + ofs0];
+                const r0 = page0[0x4000 + ofs0];
+                const r1 = page0[0x6000 + ofs0];
+                const g0 = page0[0x8000 + ofs0];
+                const g1 = page0[0xA000 + ofs0];
+                const b2 = page1[0x0000 + ofs1];
+                const b3 = page1[0x2000 + ofs1];
+                const r2 = page1[0x4000 + ofs1];
+                const r3 = page1[0x6000 + ofs1];
+                const g2 = page1[0x8000 + ofs1];
+                const g3 = page1[0xA000 + ofs1];
 
                 for (let bit = 7; bit >= 0; bit--) {
-                    const idx =
+                    const idx = (
                         (((g0 >> bit) & 1) << 11) |
                         (((g1 >> bit) & 1) << 10) |
                         (((g2 >> bit) & 1) <<  9) |
@@ -1344,7 +1348,8 @@ export class Display {
                         (((b0 >> bit) & 1) <<  3) |
                         (((b1 >> bit) & 1) <<  2) |
                         (((b2 >> bit) & 1) <<  1) |
-                        (((b3 >> bit) & 1));
+                        (((b3 >> bit) & 1))
+                    ) & idxMask;
 
                     const color = pal[idx];
                     const destX = pixelRow + (byteX * 16) + ((7 - bit) * 2);
@@ -1420,6 +1425,7 @@ export class Display {
         this.aluTileDat.fill(0);
 
         this.lineBusy = false;
+        this._lineBusyMicros = 0;
         this.lineOffset = 0;
         this.lineStyle = 0;
         this.lineX0 = 0;

@@ -8,6 +8,7 @@
 import { CPU6809 } from './cpu6809.js';
 import { Display } from './display.js';
 import { FDC } from './fdc.js';
+import { FddSound } from './fdd_sound.js';
 import { Scheduler } from './scheduler.js';
 import { Keyboard } from './keyboard.js';
 import { PSG } from './psg.js';
@@ -40,10 +41,10 @@ const CG_ROM_BASE        = 0xD000;   // CG ROM region (within sub address space)
 const SUB_ROM_AV_BASE    = 0xE000;   // Type-A/B ROM start ($E000-$FFFF, 8KB)
 const SUB_ROM_AV_SIZE    = 0x2000;   // 8KB
 
-// FM77AV Sub monitor types
-const SUB_MONITOR_A      = 0;        // FM77AV native mode
-const SUB_MONITOR_B      = 1;        // FM77AV extended
-const SUB_MONITOR_C      = 2;        // FM-7 compatible
+// FM77AV Sub monitor types (matches $FD13 register values)
+const SUB_MONITOR_C      = 0;        // FM-7 compatible ($FD13=0)
+const SUB_MONITOR_A      = 1;        // FM77AV native / INITIATE ($FD13=1)
+const SUB_MONITOR_B      = 2;        // FM77AV extended ($FD13=2)
 
 // I/O port addresses (main CPU side)
 const FD00_KEY_STATUS    = 0xFD00;   // Keyboard status
@@ -63,7 +64,7 @@ const FD32_APAL_BLUE     = 0xFD32;   // Analog palette Blue data
 const FD33_APAL_RED      = 0xFD33;   // Analog palette Red data
 
 // FM77AV MMR (Memory Management Register)
-const FD92_MMR_SEG       = 0xFD92;   // MMR segment register
+const FD92_TWR_OFFSET    = 0xFD92;   // TWR (Text Window RAM) offset register
 const FD93_MMR_CTRL      = 0xFD93;   // MMR control register
 const MMR_WINDOW_SIZE    = 0x1000;   // 4KB per MMR window
 const MMR_NUM_SEGMENTS   = 16;       // 16 × 4KB = 64KB logical space
@@ -99,6 +100,24 @@ export class FM7 {
         this.cmt       = new CMT();
         this.psg       = new PSG();
         this.opn       = new OPN();
+        this.fddSound  = new FddSound();
+
+        // Wire FDC sound callbacks. The FddSound instance lazily binds to
+        // whatever AudioContext PSG has created — if audio hasn't started yet,
+        // the callbacks become no-ops and the synthesiser starts producing
+        // sound once PSG's context is available.
+        this.fdc.onSeekSound = (steps) => {
+            this.fddSound.seek(steps, this.isFM77AV);
+        };
+        this.fdc.onHeadLoadSound = () => {
+            this.fddSound.headLoad(this.isFM77AV);
+        };
+        this.fdc.onDiskInsert = () => {
+            this.fddSound.diskInsert(this.isFM77AV);
+        };
+        this.fdc.onDiskEject = () => {
+            this.fddSound.diskEject(this.isFM77AV);
+        };
 
         // --- Memory arrays ---
         this.mainRAM    = new Uint8Array(0x10000);              // Full 64KB RAM (ROM overlays on top)
@@ -143,7 +162,8 @@ export class FM7 {
         this._subAttn     = false;  // Sub CPU attention flag (FIRQ to main CPU)
         this._breakKey    = false;  // BREAK key state (directly read via $FD04 bit1)
         this._breakKeyCodes = ['Backquote', 'Pause']; // Configurable break key assignments
-        this._bootMode    = 'dos';  // 'dos' or 'basic'
+        this._bootMode    = 'dos';  // 'dos' or 'basic' (current active mode)
+        this._bootModeOverride = 'auto'; // 'auto' | 'dos' | 'basic' — UI override
         this._basicRomEnabled = true; // BASIC ROM overlay at $8000-$FBFF
 
         // --- FM77AV specific state ---
@@ -152,7 +172,7 @@ export class FM7 {
         this._subROM_BSize    = 0;       // Actual size of loaded Type-B ROM
         this._initiatorActive = false;   // Initiator ROM mapped at $FE00-$FFFF
         this._fd10Reg         = 0;       // FM77AV extended sub CPU mode register ($FD10)
-        this._subMonitorType  = SUB_MONITOR_C; // Sub monitor: A=0, B=1, C=2
+        this._subMonitorType  = SUB_MONITOR_C; // Sub monitor: C=0, A=1, B=2
         this._cgRomBank       = 0;       // CG ROM bank (0-3, bits 0-1 of $D430)
         this._nmiMaskSub      = false;   // NMI mask for sub CPU (bit 7 of $D430)
         this._subResetFlag    = false;   // Sub CPU reset flag (read via $D430 bit 0)
@@ -180,8 +200,8 @@ export class FM7 {
         // Maps 16 × 4KB windows in logical $0000-$FFFF to physical extended RAM
         this._mmrEnabled   = false;        // MMR active flag
         this._mmrBankReg   = 0;            // $FD90: bank select (0-7) for register access AND address translation
-        this._mmrBank93    = 0;            // $FD93 bit 6 stored for read-back (not used for bank selection)
-        this._mmrSegSelect = 0;            // Segment select for $FD92 writes
+        this._twrFlag      = false;        // $FD93 bit 6: TWR (Text Window RAM) enable
+        this._twrReg       = 0;            // $FD92: TWR offset register
         this._mmrRegs      = new Uint8Array(128); // 8 banks × 16 segments
         this._extRAM       = new Uint8Array(MMR_EXTENDED_RAM); // 192KB extended RAM
 
@@ -262,7 +282,7 @@ export class FM7 {
             const physPage = this._mmrRegs[bankOff + seg];
             // FM77AV MMR physical page mapping:
             //   Pages 0x00-0x0F: extended RAM bank 0 (64KB)
-            //   Pages 0x10-0x1F: sub CPU direct access when halted, else extended RAM bank 1
+            //   Pages 0x10-0x1F: sub CPU address space (VRAM/IO/ROM) — accessible only when sub CPU halted
             //   Pages 0x20-0x2F: extended RAM bank 2 (64KB)
             //   Pages 0x30-0x3F: main RAM (same physical memory as CPU direct access)
             if ((physPage & 0x30) === 0x30) {
@@ -271,11 +291,14 @@ export class FM7 {
                     return this.mainRAM[(mainPage << 12) | (addr & 0x0FFF)];
                 }
                 // Identity mapping: fall through to normal map
-            } else if (this._subHalted && (physPage & 0xF0) === 0x10) {
-                // Sub CPU direct access: pages $10-$1F → sub CPU address space
-                // Physical page $1N maps to sub CPU address $N000-$NFFF
-                const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
-                return this._subRead(subAddr);
+            } else if ((physPage & 0xF0) === 0x10) {
+                // Pages $10-$1F: sub CPU address space
+                // Only accessible when sub CPU is halted (returns 0xFF otherwise)
+                if (this._subHalted) {
+                    const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
+                    return this._subRead(subAddr);
+                }
+                return 0xFF;
             } else {
                 const physAddr = (physPage << 12) | (addr & 0x0FFF);
                 if (physAddr < MMR_EXTENDED_RAM) {
@@ -367,11 +390,13 @@ export class FM7 {
                     return;
                 }
                 // Identity: fall through to normal write path
-            } else if (this._subHalted && (physPage & 0xF0) === 0x10) {
-                // Sub CPU direct access: pages $10-$1F → sub CPU address space
-                // Physical page $1N maps to sub CPU address $N000-$NFFF
-                const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
-                this._subWrite(subAddr, val);
+            } else if ((physPage & 0xF0) === 0x10) {
+                // Pages $10-$1F: sub CPU address space
+                // Only accessible when sub CPU is halted (writes ignored otherwise)
+                if (this._subHalted) {
+                    const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
+                    this._subWrite(subAddr, val);
+                }
                 return;
             } else {
                 // Pages 0x00-0x0F, 0x20-0x2F: extended RAM
@@ -562,9 +587,9 @@ export class FM7 {
             switch (addr) {
                 case 0xFD30: return (this._analogPaletteAddr >> 8) & 0x0F;
                 case 0xFD31: return this._analogPaletteAddr & 0xFF;
-                case 0xFD32: return (entry >> 8) & 0x0F;  // Blue
-                case 0xFD33: return (entry >> 4) & 0x0F;  // Red
-                case 0xFD34: return entry & 0x0F;          // Green
+                case 0xFD32: return entry & 0x0F;          // Blue (bits 0-3)
+                case 0xFD33: return (entry >> 4) & 0x0F;  // Red  (bits 4-7)
+                case 0xFD34: return (entry >> 8) & 0x0F;  // Green (bits 8-11)
             }
         }
 
@@ -636,13 +661,13 @@ export class FM7 {
         // $FDFD-$FDFF: Boot mode / extended registers (stub)
         if (addr >= 0xFDFD) return 0xFF;
 
-        // FM77AV: MMR registers ($FD80-$FD9F)
-        // $FD80-$FD8F: Segment registers for current bank (selected by $FD93 bit 6)
-        // $FD93: Control register (read returns enable/bank/segSelect)
-        // $FD90-$FD92, $FD94-$FD9F: unused (return $FF)
+        // FM77AV: MMR/TWR registers ($FD80-$FD9F)
+        // $FD80-$FD8F: Segment registers for current bank (selected by $FD90)
+        // $FD90: Bank select, $FD92: TWR offset (write-only), $FD93: MMR/TWR control
         if (this.isFM77AV && addr >= 0xFD80 && addr <= 0xFD9F) {
             if (addr === FD93_MMR_CTRL) {
-                return (this._mmrEnabled ? 0x80 : 0x00) | (this._mmrBank93 ? 0x40 : 0x00) | (this._mmrSegSelect & 0x0F);
+                // Returns $FF with bit7 cleared if !mmr, bit6 cleared if !twr
+                return 0xFF & (this._mmrEnabled ? 0xFF : ~0x80) & (this._twrFlag ? 0xFF : ~0x40);
             }
             if (addr === 0xFD90) {
                 return this._mmrBankReg;
@@ -651,10 +676,9 @@ export class FM7 {
                 // $FD80-$FD8F: read segment registers for bank selected by $FD90
                 return this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + (addr - 0xFD80)];
             }
-            // $FD92: Indirect segment register read
-            if (addr === FD92_MMR_SEG) {
-                const seg = this._mmrSegSelect & 0x0F;
-                return this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + seg];
+            // $FD92: TWR offset register (write-only, returns $FF on read)
+            if (addr === FD92_TWR_OFFSET) {
+                return 0xFF;
             }
             return 0xFF;
         }
@@ -720,9 +744,17 @@ export class FM7 {
         if (addr === FD05_SUB_CTRL) {
             this._subHaltRequest = (val & 0x80) !== 0;
             if (val & 0x40) {
-                // Cancel IRQ: assert IRQ on sub CPU
+                // Cancel IRQ request: deferred to instruction boundary via _subHaltAck().
+                // _subHaltAck() sets _subCancel = true but does NOT assert IRQ.
                 this._subCancelRequest = true;
+            }
+            // Level-triggered Cancel IRQ: assert/deassert based on _subCancel flag.
+            // _subCancel is promoted from _subCancelRequest by _subHaltAck(),
+            // so Cancel written NOW takes effect on the NEXT $FD05 write (RUN command).
+            if (this._subCancel) {
                 this.subCPU.intr |= 0x04; // INTR_IRQ
+            } else {
+                this.subCPU.intr &= ~0x04;
             }
             return;
         }
@@ -769,7 +801,7 @@ export class FM7 {
         }
 
         // FM77AV: $FD13 write - Sub ROM bank switch + Sub CPU reset
-        // bit 1-0: subrom_bank (0=Type-A, 1=Type-B, 2=Type-C)
+        // bit 1-0: subrom_bank (0=Type-C, 1=Type-A, 2=Type-B)
         // Writing triggers sub CPU reset
         if (addr === FD13_SUB_BANK && this.isFM77AV) {
             const bank = val & 0x03;
@@ -780,12 +812,12 @@ export class FM7 {
             this._subHalted = false;
             this._subResetFlag = true;
 
-            // Reset display subsystem (matches display_reset in reference)
+            // Reset display subsystem (display_reset + aluline_reset
+            // + ttlpalet_reset + multipag_reset sequence)
             this.display.resetALU();
             this.display.resetPalette();
             this.display.multiPage = 0;
-            // Un-rotate any applied physical scroll before resetting offsets
-            // (apply vram_scroll(-crtc_offset[i]) for both pages)
+            // Un-rotate VRAM before zeroing offsets
             const savedActive = this.display.activeVramPage;
             for (let p = 0; p < 2; p++) {
                 if (this.display.crtcOffset[p] !== 0) {
@@ -808,11 +840,15 @@ export class FM7 {
             // NOTE: displayMode (320/640) is NOT reset by sub ROM bank switch
             // NOTE: cgRomBank is NOT reset by sub ROM bank switch
 
-            // Reset NMI mask (NMI enabled after sub reset)
-            this._nmiMaskSub = false;
-            this._blankFlag = true;  // Blanking active after reset
+            // display_reset sets: NMI ENABLED, vsync=FALSE, blank=TRUE
+            this._nmiMaskSub = false;  // NMI enabled
+            this._vsyncFlag = false;
+            this._blankFlag = true;
             this._subHaltRequest = false;
             this._subCancelRequest = false;
+
+            // Trigger full display refresh
+            this.display._fullDirty = true;
 
             // Sub ROM bank → keyboard MCU mode mapping.
             // Empirically: native FM77AV games that run with Type-A use
@@ -834,11 +870,10 @@ export class FM7 {
             }
 
             this.subCPU.reset();
-            this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
             this.scheduler.setSubHalted(false);
             if (oldType !== bank) {
                 console.log('FM77AV: Sub ROM bank → Type-' +
-                    ['A', 'B', 'C', 'CG'][bank] + ', sub CPU reset');
+                    ['C', 'A', 'B', 'CG'][bank] + ', sub CPU reset');
             }
             return;
         }
@@ -860,27 +895,34 @@ export class FM7 {
                 this._analogPaletteAddr = (this._analogPaletteAddr & 0xF00) | (val & 0xFF);
                 return;
             }
+            // Analog palette internal storage format:
+            //   bits 0-3:  B level
+            //   bits 4-7:  R level
+            //   bits 8-11: G level
+            // The renderer's pixel index is built with the same layout
+            // (G in high bits, R in middle, B in low bits) so that pixel
+            // sub-plane bits map directly into palette lookup keys.
             if (addr === FD32_APAL_BLUE) {
-                // Blue data for current palette entry
+                // Blue data for current palette entry → bits 0-3
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
-                this._analogPalette[idx] = (cur & 0x0FF) | ((val & 0x0F) << 8);
+                this._analogPalette[idx] = (cur & 0xFF0) | (val & 0x0F);
                 this.display._pushScrollTrace('PAL_B', { idx, val: val & 0x0F });
                 return;
             }
             if (addr === FD33_APAL_RED) {
-                // Red data for current palette entry
+                // Red data for current palette entry → bits 4-7
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
                 this._analogPalette[idx] = (cur & 0xF0F) | ((val & 0x0F) << 4);
                 this.display._pushScrollTrace('PAL_R', { idx, val: val & 0x0F });
                 return;
             }
-            // $FD34: Green data for current palette entry
+            // $FD34: Green data for current palette entry → bits 8-11
             if (addr === 0xFD34) {
                 const idx = this._analogPaletteAddr & 0xFFF;
                 const cur = this._analogPalette[idx];
-                this._analogPalette[idx] = (cur & 0xFF0) | (val & 0x0F);
+                this._analogPalette[idx] = (cur & 0x0FF) | ((val & 0x0F) << 8);
                 this.display._pushScrollTrace('PAL_G', { idx, val: val & 0x0F });
                 return;
             }
@@ -997,12 +1039,11 @@ export class FM7 {
 
         // FM77AV: MMR registers ($FD80-$FD9F)
         if (this.isFM77AV && addr >= 0xFD80 && addr <= 0xFD9F) {
-            // $FD93: MMR control register
-            // bit 7: MMR enable, bit 6: stored for read-back, bits 3-0: segment select
+            // $FD93: MMR/TWR control register
+            // bit 7: MMR enable, bit 6: TWR enable
             if (addr === FD93_MMR_CTRL) {
                 this._mmrEnabled = (val & 0x80) !== 0;
-                this._mmrBank93 = (val >> 6) & 0x01;
-                this._mmrSegSelect = val & 0x0F;
+                this._twrFlag = (val & 0x40) !== 0;
                 return;
             }
             // $FD90: MMR bank select register (selects which bank for $FD80-$FD8F AND address translation)
@@ -1015,11 +1056,9 @@ export class FM7 {
                 this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + (addr - 0xFD80)] = val;
                 return;
             }
-            // $FD92: Indirect segment register write
-            // Writes to the segment selected by $FD93 bits 3-0, in the bank selected by $FD90
-            if (addr === FD92_MMR_SEG) {
-                const seg = this._mmrSegSelect & 0x0F;
-                this._mmrRegs[this._mmrBankReg * MMR_NUM_SEGMENTS + seg] = val;
+            // $FD92: TWR offset register write
+            if (addr === FD92_TWR_OFFSET) {
+                this._twrReg = val & 0xFF;
                 return;
             }
             // $FD91, $FD94-$FD9F: unused
@@ -1079,10 +1118,10 @@ export class FM7 {
 
             // Handle side effects that need fm7-level state
             if (result.sideEffect === 'cancelAck') {
-                // $D402: Cancel IRQ ACK
+                // $D402: Cancel IRQ ACK — clear both flag and request, deassert IRQ
                 this._subCancel = false;
-                // De-assert IRQ on sub CPU
-                // Since cancel is the only IRQ source for sub CPU, clear it
+                this._subCancelRequest = false;
+                // De-assert IRQ on sub CPU (subcpu_irq level-trigger)
                 this.subCPU.intr &= ~0x04;  // INTR_IRQ = 0x04
             } else if (result.sideEffect === 'attention') {
                 // $D404: Set attention flag, trigger main CPU FIRQ
@@ -1366,6 +1405,15 @@ export class FM7 {
                 }
                 this.scheduler.mainCyclesTotal += mainElapsed;
 
+                // Line drawing BUSY timer
+                if (this.display.lineBusy && this.display._lineBusyMicros > 0) {
+                    this.display._lineBusyMicros -= cyclesToUs(mainElapsed);
+                    if (this.display._lineBusyMicros <= 0) {
+                        this.display.lineBusy = false;
+                        this.display._lineBusyMicros = 0;
+                    }
+                }
+
                 // FDC state machine step
                 this.fdc.step(mainElapsed);
 
@@ -1376,11 +1424,6 @@ export class FM7 {
                         this._vsyncFlag = true;  // Active display resumes
                         this._vblankCycles = 0;
                     }
-                }
-
-                // Sub CPU NMI delay (INTR_SLOAD emulation)
-                if (this._subNmiDelay > 0) {
-                    this._subNmiDelay -= mainElapsed;
                 }
 
                 // HBlank timing (§12.1): line period ≈63.5μs (127 cycles @2MHz)
@@ -1442,14 +1485,14 @@ export class FM7 {
 
             // Start vertical blanking period
             this._vsyncFlag = false;  // Enter VBlank
-            // VBlank lasts ~510μs (VSYNC pulse)
-            this._vblankCycles = usToCycles(510);
+            // VBlank: 238 total lines - 200 visible = 38 lines × 63.5μs ≈ 2413μs
+            // (Previously 510μs was only the VSYNC pulse width, not the full blanking interval)
+            this._vblankCycles = usToCycles(2413);
         });
 
         // Sub CPU NMI timer (50 Hz = 20ms, independent of VSync per §4.2)
         this.scheduler.addEvent('subnmi', 20000, () => {
-            if (!this._subHalted && !(this.isFM77AV && this._nmiMaskSub)
-                && this._subNmiDelay <= 0) {
+            if (!this._subHalted && !(this.isFM77AV && this._nmiMaskSub)) {
                 if (!(this.subCPU.intr & 0x01)) {
                     this.subCPU.nmi();
                 }
@@ -1497,11 +1540,12 @@ export class FM7 {
         if (mainIrq) this.mainCPU.irq();
         else this.mainCPU.intr &= ~0x04;  // INTR_IRQ
 
-        // Sub CPU FIRQ: keyboard-driven (active whenever key data available)
-        // On real FM-7, the keyboard encoder IC generates FIRQ to sub CPU
-        // independently of the main CPU IRQ mask ($FD02). FIRQ is asserted
-        // as long as keyboard data is available, regardless of mask setting.
-        if (this.keyboard._keyAvailable) {
+        // Sub CPU FIRQ: keyboard-driven, gated by $FD02 bit 0.
+        // $FD02 bit 0 controls keyboard routing:
+        //   bit 0 = 0 → keyboard._irqMask = 1 → keyboard routed to sub CPU via FIRQ
+        //   bit 0 = 1 → keyboard._irqMask = 0 → keyboard routed to main CPU via IRQ
+        // When keyboard is routed to main CPU, sub CPU FIRQ must be cleared.
+        if (this.keyboard._keyAvailable && this.keyboard._irqMask !== 0) {
             this.subCPU.intr |= 0x02; // INTR_FIRQ
         } else {
             this.subCPU.intr &= ~0x02;
@@ -1528,21 +1572,23 @@ export class FM7 {
                 this._subHalted = true;
                 this._subBusy = true;
                 this.scheduler.setSubHalted(true);
-                // EXPERIMENT: save sub CPU's view of $D430 state at halt time.
+                // Save sub CPU's view of $D430 state at halt time.
                 // Main CPU MMR writes to $D430 during halt may otherwise
                 // change apg from under the sub CPU's feet, causing it to
                 // write scroll registers to the wrong page on resume.
-                this._haltSavedActivePage = this.display.activeVramPage;
-                this._haltSavedDisplayPage = this.display.displayVramPage;
+                // Toggle: fm7.haltSaveApg = false to disable (BUG03 test)
+                if (this.haltSaveApg !== false) {
+                    this._haltSavedActivePage = this.display.activeVramPage;
+                    this._haltSavedDisplayPage = this.display.displayVramPage;
+                }
                 this.display._pushScrollTrace('HALT', { val: this.subCPU.pc });
             }
         } else {
             if (this._subHalted) {
                 this._subHalted = false;
                 this.scheduler.setSubHalted(false);
-                // EXPERIMENT: restore sub CPU's view of $D430 state.
-                // Sub CPU expects the apg/dpg state it had set itself.
-                if (this._haltSavedActivePage !== undefined) {
+                // Restore sub CPU's view of $D430 state.
+                if (this.haltSaveApg !== false && this._haltSavedActivePage !== undefined) {
                     this.display._setActiveVramPage(this._haltSavedActivePage);
                     this.display._setDisplayVramPage(this._haltSavedDisplayPage);
                     this._haltSavedActivePage = undefined;
@@ -1550,7 +1596,9 @@ export class FM7 {
                 this.display._pushScrollTrace('RUN', { val: this.subCPU.pc });
             }
         }
-        // Apply CANCEL request
+        // Apply CANCEL request: promote request to flag.
+        // Do NOT assert IRQ here — IRQ is only asserted when $FD05 is written
+        // (level-trigger check), typically on the RUN command after halt.
         if (this._subCancelRequest) {
             this._subCancel = true;
             this._subCancelRequest = false;
@@ -1585,6 +1633,7 @@ export class FM7 {
             } else {
                 this.opn.resumeAudio();
             }
+            this.fddSound.init(this.psg._audioCtx);
 
             if (this._breakKeyCodes.includes(e.code)) {
                 e.preventDefault();
@@ -1922,7 +1971,10 @@ export class FM7 {
         // Auto boot mode: disk in drive 0 → DOS, otherwise → BASIC
         // =====================================================================
         const hasDisk = this.fdc.disks[0] && this.fdc.disks[0].loaded;
-        const bootMode = hasDisk ? 'dos' : 'basic';
+        let bootMode;
+        if (this._bootModeOverride === 'dos') bootMode = 'dos';
+        else if (this._bootModeOverride === 'basic') bootMode = 'basic';
+        else bootMode = hasDisk ? 'dos' : 'basic';
         this._bootMode = bootMode;
 
         // Clear main RAM; shared RAM to 0xFF (FM-7 hardware default)
@@ -1974,8 +2026,8 @@ export class FM7 {
             // MMR reset
             this._mmrEnabled = false;
             this._mmrBankReg = 0;
-            this._mmrBank93 = 0;
-            this._mmrSegSelect = 0;
+            this._twrFlag = false;
+            this._twrReg = 0;
             this._mmrRegs.fill(0);
             // Default MMR mapping: identity (segment N → physical page N + $30 for main RAM)
             for (let bank = 0; bank < 8; bank++) {
@@ -2055,7 +2107,7 @@ export class FM7 {
 
         // Reset sub CPU — it reads its own reset vector from sub ROM
         this.subCPU.reset();
-        this._subNmiDelay = 50; // Block NMI until sub CPU sets up stack
+        // NMI is masked via _nmiMaskSub (set earlier); sub ROM unmasks via $D430
         this.scheduler.setSubHalted(false);
 
         // Determine main CPU start address based on boot mode and machine type
@@ -2086,6 +2138,12 @@ export class FM7 {
         // Set main CPU initial state (DP=0, interrupts masked, PC=target)
         this.mainCPU.reset();
         this.mainCPU.pc = mainPC;
+        // Apply deferred register setup from NEW BOOT bypass
+        if (this._bootRegs) {
+            if (this._bootRegs.a !== undefined) this.mainCPU.a = this._bootRegs.a;
+            if (this._bootRegs.x !== undefined) this.mainCPU.x = this._bootRegs.x;
+            this._bootRegs = null;
+        }
         // Set reset vector in RAM to match (for consistency)
         this.mainRAM[0xFFFE] = (mainPC >> 8) & 0xFF;
         this.mainRAM[0xFFFF] = mainPC & 0xFF;
@@ -2094,7 +2152,7 @@ export class FM7 {
         console.log(`${this._machineType.toUpperCase()} reset (boot: ${bootMode}, ${initiatorPath ? 'INITIATE.ROM' : 'bypass'})`);
         console.log(`  Main CPU PC: $${mainPC.toString(16).toUpperCase().padStart(4, '0')}`);
         console.log(`  Initiator: ${initiatorPath ? 'ACTIVE (executing)' : 'BYPASSED'}, ROM loaded: ${this.romLoaded.initiate}`);
-        console.log(`  Sub monitor: Type-${['A','B','C'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
+        console.log(`  Sub monitor: Type-${['C','A','B'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
         console.log(`  Disk in drive 0: ${hasDisk ? 'YES' : 'NO'}, F-BASIC ROM: ${this.romLoaded.fbasic ? 'YES' : 'NO'}`);
         const srvHi = this._subRead(0xFFFE);
         const srvLo = this._subRead(0xFFFF);
@@ -2148,6 +2206,124 @@ export class FM7 {
         if (!disk || !disk.loaded) {
             console.error('[BOOT] No disk in drive 0 — falling back to BASIC');
             return this._basicBootBypass();
+        }
+
+        // FM-7 only: detect NEW BOOT layout (sec1 expected at $0100).
+        // On FM77AV the INITIATE.ROM's NEW BOOT path already handles this,
+        // but FM-7's boot_dos.rom only loads to $0300 (OLD BOOT).
+        // Detect both formats:
+        //   (a) Direct IPL: ORCC #$50 ($1A $50) + LDS #$01xx ($10 $CE $01)
+        //   (b) FLEX format: BRA +$20 ($20 $20), then IPL at offset $22
+        //       with ORCC #$50 + LDS #$01xx — same pattern, $22 bytes in.
+        // Pre-load sectors at NEW BOOT positions and jump to $0100.
+        if (!this.isFM77AV) {
+            const sec1 = disk.getSector(0, 0, 1);
+            if (sec1 && sec1.data && sec1.data.length >= 0x28) {
+                const d = sec1.data;
+                // Check Direct IPL at offset 0
+                const directIPL = d[0] === 0x1A && d[1] === 0x50 &&
+                                  d[2] === 0x10 && d[3] === 0xCE && d[4] === 0x01;
+                // Check FLEX format: BRA +$20 at offset 0, IPL at offset $22
+                const flexIPL = d[0] === 0x20 && d[1] === 0x20 &&
+                                d[0x22] === 0x1A && d[0x23] === 0x50 &&
+                                d[0x24] === 0x10 && d[0x25] === 0xCE && d[0x26] === 0x01;
+                if (directIPL || flexIPL) {
+                    // Pre-load T0/S0 sectors 1..16 to $0100-$10FF
+                    for (let sec = 1; sec <= 16; sec++) {
+                        const s = disk.getSector(0, 0, sec);
+                        if (!s || !s.data) break;
+                        const base = sec * 0x100;
+                        for (let i = 0; i < s.data.length; i++) {
+                            this.mainRAM[(base + i) & 0xFFFF] = s.data[i];
+                        }
+                    }
+
+                    // Parse boot sector parameter tables and pre-load
+                    // additional sectors that the IPL would read.
+                    // The IPL modifies the sector counters in these tables,
+                    // and F-BASIC reuses them. If we enter at $0100, the
+                    // modified tables cause reads of non-existent sectors.
+                    // Instead, pre-load everything and skip the IPL.
+                    const readParam = (off) => ({
+                        type: d[off], bufHi: d[off+2], bufLo: d[off+3],
+                        track: d[off+4], sector: d[off+5], side: d[off+6], drive: d[off+7],
+                    });
+                    const iplBase = flexIPL ? 0x22 : 0x00;
+                    // Table offsets relative to sector start:
+                    //   $02: Table A, $0A: Table B, $12: Table C (SIR)
+                    const tabA = readParam(0x02);
+                    const tabB = readParam(0x0A);
+                    // Extract loop counts from IPL code.
+                    // The IPL code after the SIR check has:
+                    //   LDB #countA at iplBase+$17, LDB #countB at iplBase+$31
+                    const countA = d[iplBase + 0x18] || 0;
+                    const countB = d[iplBase + 0x32] || 0;
+
+                    // Pre-load sectors for Table A
+                    if (tabA.type === 0x0A && countA > 0) {
+                        let buf = (tabA.bufHi << 8) | tabA.bufLo;
+                        let sec = tabA.sector;
+                        for (let i = 0; i < countA; i++) {
+                            const s = disk.getSector(tabA.track, tabA.side, sec);
+                            if (s && s.data) {
+                                for (let j = 0; j < s.data.length; j++) {
+                                    this.mainRAM[(buf + j) & 0xFFFF] = s.data[j];
+                                }
+                            }
+                            buf += 0x100;
+                            sec++;
+                        }
+                        console.log(`[BOOT]   Table A: ${countA} secs from T${tabA.track} S${tabA.sector} H${tabA.side} → $${((tabA.bufHi<<8)|tabA.bufLo).toString(16).toUpperCase()}`);
+                    }
+                    // Pre-load sectors for Table B
+                    if (tabB.type === 0x0A && countB > 0) {
+                        let buf = (tabB.bufHi << 8) | tabB.bufLo;
+                        let sec = tabB.sector;
+                        for (let i = 0; i < countB; i++) {
+                            const s = disk.getSector(tabB.track, tabB.side, sec);
+                            if (s && s.data) {
+                                for (let j = 0; j < s.data.length; j++) {
+                                    this.mainRAM[(buf + j) & 0xFFFF] = s.data[j];
+                                }
+                            }
+                            buf += 0x100;
+                            sec++;
+                        }
+                        console.log(`[BOOT]   Table B: ${countB} secs from T${tabB.track} S${tabB.sector} H${tabB.side} → $${((tabB.bufHi<<8)|tabB.bufLo).toString(16).toUpperCase()}`);
+                    }
+
+                    // Install boot_dos.rom code to $FE00 for FDC callbacks
+                    // ($FE02 RESTORE, $FE08 read sector).
+                    this._installBootROMtoRAM();
+                    // Initialize FDC ports as boot_dos.rom would have done.
+                    this._initFDCPorts();
+                    // Enable timer IRQ ($FD02 bit 2).
+                    this._irqMaskReg |= 0x04;
+
+                    // Skip the IPL entirely — jump to F-BASIC cold start.
+                    // The IPL would modify parameter tables at $0102/$010A
+                    // (incrementing sector counts past max), and F-BASIC
+                    // reuses those tables. Entering at $0100 would cause
+                    // reads of non-existent sectors. Instead, enter at
+                    // the F-BASIC cold start address.
+                    if (this.romLoaded.fbasic) {
+                        const coldStart = (this.fbasicROM[0x7BFE] << 8) | this.fbasicROM[0x7BFF];
+                        // The IPL sets A=$FF (nonzero = disk boot) and
+                        // X = Table A buffer start (top of usable RAM,
+                        // DOS code resides from here to $7FFF).
+                        // F-BASIC cold start uses TSTA; BNE to decide
+                        // whether to use X as memory top or default $8000.
+                        const dosBase = (tabA.bufHi << 8) | tabA.bufLo;
+                        // Defer register setup — mainCPU.reset() runs after
+                        // _dosBootDirect() returns and would wipe these.
+                        this._bootRegs = { a: 0xFF, x: dosBase };
+                        console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): all sectors pre-loaded, entry $${coldStart.toString(16).toUpperCase()} (X=$${dosBase.toString(16).toUpperCase()})`);
+                        return coldStart;
+                    }
+                    console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): sectors loaded, entry $0100`);
+                    return 0x0100;
+                }
+            }
         }
 
         // For FM77AV: install boot_dos.rom code into RAM at $FE00-$FFDF.
@@ -2274,6 +2450,7 @@ export class FM7 {
         } else {
             this.opn.resumeAudio();
         }
+        this.fddSound.init(this.psg._audioCtx);
 
         // Bind frame method
         this._boundFrame = () => this._frame();
@@ -2390,7 +2567,7 @@ export class FM7 {
         console.log(`  activeVramPage: ${d.activeVramPage}, displayVramPage: ${d.displayVramPage}`);
         console.log(`  multiPage: $${(d.multiPage||0).toString(16)}`);
         console.log(`  vramOffset: [${d.vramOffset[0]}, ${d.vramOffset[1]}]`);
-        console.log(`  subMonitorType: ${['A','B','C'][this._subMonitorType] || this._subMonitorType}`);
+        console.log(`  subMonitorType: ${['C','A','B'][this._subMonitorType] || this._subMonitorType}`);
         console.log(`  subBusy: ${this._subBusy}, subHalted: ${this._subHalted}`);
         console.log(`  blankFlag: ${this._blankFlag}, nmiMask: ${this._nmiMaskSub}`);
         console.log(`  subPC: $${(this.subCPU.pc||0).toString(16).toUpperCase()}`);

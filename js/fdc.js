@@ -366,8 +366,202 @@ export class FDC {
         // Callback for IRQ generation
         this.onIRQ = null;
 
+        // Callbacks for FDD sound synthesis (see js/fdd_sound.js).
+        // onSeekSound(steps) — Type I command, `steps` = number of physical
+        //   track transitions the head will perform (0 if already on target).
+        // onHeadLoadSound() — head load click: Type I with h=1, or any Type II/III.
+        // Force Interrupt never triggers sound.
+        this.onSeekSound     = null;
+        this.onHeadLoadSound = null;
+        this.onDiskInsert    = null;
+        this.onDiskEject     = null;
+
         // Sector iteration for Read Address
         this.readAddrSectorIndex = 0;
+
+        // ---- Diagnostic logging (OFF by default) ----
+        this.logEnabled = false;
+        this.log = [];
+        this._logCycle = 0;              // Master cycle counter (monotonic)
+        this._logDrqPrev = false;
+        this._logIrqPrev = false;
+        this._logBusyPrev = false;
+        this._logBusyStart = 0;
+        this._logCmdStart = 0;
+        this._logCmdName = '';
+        this._logCmdByte = 0;
+        this._logByteCount = 0;          // Bytes transferred in current sector op
+        this._logTotalBytes = 0;         // Bytes transferred in current multi-op
+    }
+
+    // =========================================================================
+    // Logging helpers
+    // =========================================================================
+
+    _logCmdNameOf(cmd) {
+        const h = cmd & 0xF0;
+        if (h === 0x00) return 'RESTORE';
+        if (h === 0x10) return 'SEEK';
+        if (h === 0x20 || h === 0x30) return 'STEP';
+        if (h === 0x40 || h === 0x50) return 'STEP_IN';
+        if (h === 0x60 || h === 0x70) return 'STEP_OUT';
+        if (h === 0x80) return 'READ_SEC';
+        if (h === 0x90) return 'READ_MULTI';
+        if (h === 0xA0) return 'WRITE_SEC';
+        if (h === 0xB0) return 'WRITE_MULTI';
+        if (h === 0xC0) return 'READ_ADDR';
+        if (h === 0xD0) return 'FORCE_INT';
+        if (h === 0xE0) return 'READ_TRACK';
+        if (h === 0xF0) return 'WRITE_TRACK';
+        return '???';
+    }
+
+    _logPush(entry) {
+        if (!this.logEnabled) return;
+        entry.cyc = this._logCycle;
+        this.log.push(entry);
+    }
+
+    /** Detect and log DRQ/IRQ/BUSY edges since last call. */
+    _logEdges() {
+        if (!this.logEnabled) return;
+        const drq = this.drqFlag;
+        const irq = this.irqFlag;
+        const busy = (this.statusReg & STATUS.BUSY) !== 0;
+        if (drq !== this._logDrqPrev) {
+            this.log.push({ cyc: this._logCycle, t: drq ? 'DRQ+' : 'DRQ-' });
+            this._logDrqPrev = drq;
+        }
+        if (irq !== this._logIrqPrev) {
+            this.log.push({ cyc: this._logCycle, t: irq ? 'IRQ+' : 'IRQ-' });
+            this._logIrqPrev = irq;
+        }
+        if (busy !== this._logBusyPrev) {
+            if (busy) {
+                this._logBusyStart = this._logCycle;
+                this.log.push({ cyc: this._logCycle, t: 'BUSY+' });
+            } else {
+                const dur = this._logCycle - this._logBusyStart;
+                this.log.push({
+                    cyc: this._logCycle, t: 'BUSY-',
+                    durCyc: dur, durUs: +(dur / 2).toFixed(1),
+                });
+            }
+            this._logBusyPrev = busy;
+        }
+    }
+
+    /** Clear log and reset cycle counter. */
+    clearLog() {
+        this.log = [];
+        this._logCycle = 0;
+        this._logDrqPrev = this.drqFlag;
+        this._logIrqPrev = this.irqFlag;
+        this._logBusyPrev = (this.statusReg & STATUS.BUSY) !== 0;
+        this._logBusyStart = 0;
+        this._logByteCount = 0;
+        this._logTotalBytes = 0;
+    }
+
+    /**
+     * Format log as plain text, one event per line.
+     * @param {Object} [opts]
+     * @param {boolean} [opts.compress=true] Collapse consecutive identical
+     *   events (same type + same details) into one line with ×N count.
+     *   Dramatically shrinks $FD1F polling noise.
+     * @param {string[]} [opts.skipTypes] Event type names to exclude
+     *   (e.g. ['R','W']). Applied before compression.
+     * @param {string[]} [opts.includeTypes] If set, only these event types
+     *   are emitted (whitelist, takes precedence over skipTypes).
+     * @param {string[]} [opts.skipReg] Register names to exclude from
+     *   R/W events (e.g. ['IRQDRQ']). Non-R/W events are untouched.
+     * @param {string[]} [opts.includeReg] If set, only R/W events whose
+     *   reg matches are emitted (whitelist, takes precedence over skipReg).
+     */
+    dumpLogText(opts = {}) {
+        const compress = opts.compress !== false;
+        const skipTypes  = new Set(opts.skipTypes    || []);
+        const inclTypes  = opts.includeTypes ? new Set(opts.includeTypes) : null;
+        const skipReg    = new Set(opts.skipReg      || []);
+        const inclReg    = opts.includeReg    ? new Set(opts.includeReg)    : null;
+        const lines = [];
+        lines.push('# DevM7 FDC log');
+        lines.push('# cyc = cycles @ 2MHz (divide by 2 for µs)');
+        lines.push(`# compress=${compress}`);
+        if (inclTypes) lines.push(`# includeTypes=${[...inclTypes].join(',')}`);
+        else if (skipTypes.size) lines.push(`# skipTypes=${[...skipTypes].join(',')}`);
+        if (inclReg) lines.push(`# includeReg=${[...inclReg].join(',')}`);
+        else if (skipReg.size) lines.push(`# skipReg=${[...skipReg].join(',')}`);
+        lines.push('# columns: cyc\tevent\tdetails');
+        const fmtDetails = (e) => {
+            const d = [];
+            for (const k of Object.keys(e)) {
+                if (k === 'cyc' || k === 't') continue;
+                d.push(`${k}=${e[k]}`);
+            }
+            return d.join(' ');
+        };
+        const keyOf = (e) => `${e.t || ''}|${fmtDetails(e)}`;
+        const isRW = (e) => e.t === 'R' || e.t === 'W';
+        const keep = (e) => {
+            const t = e.t || '';
+            if (inclTypes) { if (!inclTypes.has(t)) return false; }
+            else if (skipTypes.has(t)) return false;
+            if (isRW(e)) {
+                const reg = e.reg || '';
+                if (inclReg) { if (!inclReg.has(reg)) return false; }
+                else if (skipReg.has(reg)) return false;
+            }
+            return true;
+        };
+        const filtered = this.log.filter(keep);
+        if (!compress) {
+            for (const e of filtered) {
+                const parts = [e.cyc.toString(), e.t || ''];
+                const d = fmtDetails(e);
+                if (d) parts.push(d);
+                lines.push(parts.join('\t'));
+            }
+        } else {
+            let i = 0;
+            const N = filtered.length;
+            while (i < N) {
+                const e = filtered[i];
+                const k = keyOf(e);
+                let j = i + 1;
+                while (j < N && keyOf(filtered[j]) === k) j++;
+                const run = j - i;
+                const parts = [e.cyc.toString(), e.t || ''];
+                const d = fmtDetails(e);
+                if (d) parts.push(d);
+                if (run > 1) {
+                    parts.push(`×${run}`);
+                    parts.push(`lastCyc=${filtered[j - 1].cyc}`);
+                }
+                lines.push(parts.join('\t'));
+                i = j;
+            }
+        }
+        return lines.join('\n') + '\n';
+    }
+
+    /** Trigger browser download of the log as a text file. */
+    downloadLog(filename = 'devm7_fdc.log') {
+        const text = this.dumpLogText();
+        if (typeof Blob === 'undefined' || typeof document === 'undefined') {
+            console.log(text);
+            return;
+        }
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log(`FDC log saved: ${filename} (${this.log.length} events)`);
     }
 
     // Timing constants (in CPU cycles at 1.2288 MHz)
@@ -376,6 +570,10 @@ export class FDC {
     static ROTATE_DELAY = 7373;
     // MFM byte transfer delay: 32µs per byte = ~39 cycles
     static BYTE_DELAY = 39;
+    // Inter-sector gap delay for multi-sector reads/writes
+    // Real disk: ~12.5ms between adjacent sectors (200ms / 16 sectors)
+    // Use ROTATE_DELAY (average rotational latency) for realistic timing
+    static MULTI_SECTOR_GAP = 7373;
 
     // =========================================================================
     // Disk Management
@@ -419,6 +617,7 @@ export class FDC {
 
         if (success) {
             this.disks[driveNum] = disk;
+            if (this.onDiskInsert) this.onDiskInsert(driveNum);
         } else {
             console.error(`FDC: Failed to load disk in drive ${driveNum}`);
         }
@@ -432,7 +631,9 @@ export class FDC {
      */
     ejectDisk(driveNum) {
         if (driveNum >= 0 && driveNum <= 3) {
+            const hadDisk = !!this.disks[driveNum];
             this.disks[driveNum] = null;
+            if (hadDisk && this.onDiskEject) this.onDiskEject(driveNum);
         }
     }
 
@@ -454,44 +655,68 @@ export class FDC {
      * @returns {number} Byte value
      */
     readIO(addr) {
+        let value = 0xFF;
+        let extra = null;
         switch (addr) {
             case 0xFD18: // Status Register
                 // Reading status clears IRQ
                 this.irqFlag = false;
-                return this.statusReg;
+                value = this.statusReg;
+                break;
 
             case 0xFD19: // Track Register
-                return this.trackReg & 0xFF;
+                value = this.trackReg & 0xFF;
+                break;
 
             case 0xFD1A: // Sector Register
-                return this.sectorReg & 0xFF;
+                value = this.sectorReg & 0xFF;
+                break;
 
             case 0xFD1B: // Data Register
                 // If DRQ is set, reading data clears it and advances transfer
                 if (this.drqFlag) {
-                    const val = this.dataReg;
+                    value = this.dataReg;
                     this.drqFlag = false;
                     this.statusReg &= ~STATUS.DRQ;
+                    if (this.logEnabled) {
+                        this._logByteCount++;
+                        this._logTotalBytes++;
+                        extra = { idx: this._logByteCount };
+                    }
                     this._advanceRead();
-                    return val;
+                } else {
+                    value = this.dataReg;
                 }
-                return this.dataReg;
+                break;
 
             case 0xFD1C: // Side register readback (sidereg | 0xFE)
-                return this.currentSide | 0xFE;
+                value = this.currentSide | 0xFE;
+                break;
 
             case 0xFD1D: // Drive select readback
-                return (this.currentDrive & 0x03) | (this.motorOn ? 0x80 : 0x00);
+                value = (this.currentDrive & 0x03) | (this.motorOn ? 0x80 : 0x00);
+                break;
 
             case 0xFD1F: // DRQ/IRQ status
-                // bit 7: DRQ (data request)
-                // bit 6: IRQ (command complete)
-                // bits 0-5: unused (read as 0)
-                return (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00);
+                // bit 7: DRQ, bit 6: IRQ
+                value = (this.drqFlag ? 0x80 : 0x00) | (this.irqFlag ? 0x40 : 0x00);
+                break;
 
             default:
-                return 0xFF;
+                value = 0xFF;
+                break;
         }
+
+        if (this.logEnabled) {
+            const name = { 0xFD18: 'STA', 0xFD19: 'TRK', 0xFD1A: 'SEC',
+                           0xFD1B: 'DAT', 0xFD1C: 'SID', 0xFD1D: 'DRV',
+                           0xFD1F: 'IRQDRQ' }[addr] || ('$' + addr.toString(16));
+            const e = { cyc: this._logCycle, t: 'R', reg: name, val: '$' + (value & 0xFF).toString(16).padStart(2, '0') };
+            if (extra) Object.assign(e, extra);
+            this.log.push(e);
+            this._logEdges();
+        }
+        return value;
     }
 
     /**
@@ -501,6 +726,15 @@ export class FDC {
      */
     writeIO(addr, value) {
         value &= 0xFF;
+
+        if (this.logEnabled) {
+            const name = { 0xFD18: 'CMD', 0xFD19: 'TRK', 0xFD1A: 'SEC',
+                           0xFD1B: 'DAT', 0xFD1C: 'SID', 0xFD1D: 'DRV' }[addr]
+                         || ('$' + addr.toString(16));
+            const e = { cyc: this._logCycle, t: 'W', reg: name, val: '$' + value.toString(16).padStart(2, '0') };
+            if (addr === 0xFD18) e.cmd = this._logCmdNameOf(value);
+            this.log.push(e);
+        }
 
         switch (addr) {
             case 0xFD18: // Command Register
@@ -525,6 +759,10 @@ export class FDC {
                 if (this.drqFlag && (this.state === FDC_STATE.WRITE_TRANSFER)) {
                     this.drqFlag = false;
                     this.statusReg &= ~STATUS.DRQ;
+                    if (this.logEnabled) {
+                        this._logByteCount++;
+                        this._logTotalBytes++;
+                    }
                     this._advanceWrite();
                 }
                 break;
@@ -542,6 +780,8 @@ export class FDC {
             default:
                 break;
         }
+
+        if (this.logEnabled) this._logEdges();
     }
 
     // =========================================================================
@@ -554,17 +794,44 @@ export class FDC {
      * @param {number} cycles - Number of CPU cycles elapsed (at 2MHz)
      */
     step(cycles) {
+        if (this.logEnabled) this._logCycle += cycles;
+
         // Handle pending DRQ (byte transfer timing)
         if (this._pendingDrq) {
             this._drqTimer -= cycles;
             if (this._drqTimer <= 0) {
                 this._pendingDrq = false;
+                if (this.drqFlag && (this.state === FDC_STATE.READ_TRANSFER)) {
+                    // Previous DRQ was not consumed — lost data
+                    this.statusReg |= STATUS.LOST_DATA;
+                }
                 this.drqFlag = true;
                 this.statusReg |= STATUS.DRQ;
             }
         }
 
+        // DRQ timeout for Type II commands: auto-advance with Lost Data
+        if (this.drqFlag && !this._pendingDrq &&
+            (this.state === FDC_STATE.READ_TRANSFER || this.state === FDC_STATE.WRITE_TRANSFER)) {
+            this._drqAge = (this._drqAge || 0) + cycles;
+            if (this._drqAge >= FDC.BYTE_DELAY) {
+                this._drqAge = 0;
+                this.statusReg |= STATUS.LOST_DATA;
+                if (this.state === FDC_STATE.READ_TRANSFER) {
+                    this._advanceRead();
+                } else if (this.state === FDC_STATE.WRITE_TRANSFER) {
+                    this.dataReg = 0x00;
+                    this.drqFlag = false;
+                    this.statusReg &= ~STATUS.DRQ;
+                    this._advanceWrite();
+                }
+            }
+        } else {
+            this._drqAge = 0;
+        }
+
         if (this.state === FDC_STATE.IDLE || this.state === FDC_STATE.COMPLETE) {
+            if (this.logEnabled) this._logEdges();
             return;
         }
 
@@ -623,6 +890,7 @@ export class FDC {
                 this._completeCommand(0);
                 break;
         }
+        if (this.logEnabled) this._logEdges();
     }
 
     // =========================================================================
@@ -637,6 +905,22 @@ export class FDC {
     _executeCommand(cmd) {
         // Clear IRQ on new command
         this.irqFlag = false;
+
+        if (this.logEnabled) {
+            this._logCmdByte = cmd;
+            this._logCmdName = this._logCmdNameOf(cmd);
+            this._logCmdStart = this._logCycle;
+            this._logByteCount = 0;
+            this._logTotalBytes = 0;
+            this.log.push({
+                cyc: this._logCycle, t: 'CMD',
+                cmd: this._logCmdName,
+                byte: '$' + cmd.toString(16).padStart(2, '0'),
+                trk: this.trackReg, sec: this.sectorReg,
+                drv: this.currentDrive, side: this.currentSide,
+                pos: this.headPosition[this.currentDrive],
+            });
+        }
 
         const cmdHigh = cmd & 0xF0;
 
@@ -665,6 +949,31 @@ export class FDC {
             this.cmdFlags.v = (cmd & 0x04) !== 0;
             this.cmdFlags.r = cmd & 0x03;
             this.cmdFlags.u = (cmd & 0x10) !== 0; // Update flag for Step variants
+
+            // FDD sound: compute how many physical steps this command will make,
+            // then fire the seek-sound callback BEFORE Restore overwrites trackReg.
+            if (this.onSeekSound) {
+                let steps = 0;
+                if (cmdHigh === 0x00) {
+                    // Restore: step out until track 0. The physical drive stops
+                    // at TR00, but the FDC has no a-priori knowledge of head
+                    // position — the boot ROM uses Restore as "find home", so
+                    // assume a worst-case pass from the current head position.
+                    steps = this.headPosition[this.currentDrive] & 0xFF;
+                    if (steps === 0) steps = 1; // always audible
+                } else if (cmdHigh === 0x10) {
+                    // Seek: |dataReg - trackReg|
+                    steps = Math.abs((this.dataReg & 0xFF) - (this.trackReg & 0xFF));
+                } else {
+                    // Step / Step-In / Step-Out: exactly 1 track
+                    steps = 1;
+                }
+                this.onSeekSound(steps);
+            }
+            // Head load click if h=1 (force head load on Type I).
+            if (this.cmdFlags.h && this.onHeadLoadSound) {
+                this.onHeadLoadSound();
+            }
 
             if (cmdHigh === 0x00) {
                 // Restore: seek to track 0
@@ -699,6 +1008,9 @@ export class FDC {
             this.cmdFlags.e = (cmd & 0x04) !== 0;
             this.cmdFlags.a0 = (cmd & 0x01) !== 0; // DAM flag for write
 
+            // FDD sound: head-load click for any Type II command.
+            if (this.onHeadLoadSound) this.onHeadLoadSound();
+
             // No disk inserted: return NOT_READY.
             // MB8877 reports NOT_READY when drive has no media.
             // Boot ROMs check for NOT_READY to skip disk boot immediately.
@@ -732,6 +1044,9 @@ export class FDC {
             this.commandType = CMD_TYPE.TYPE_III;
             this.cmdFlags.e = (cmd & 0x04) !== 0;
 
+            // FDD sound: head-load click for Type III.
+            if (this.onHeadLoadSound) this.onHeadLoadSound();
+
             if (!this.currentDisk || !this.currentDisk.loaded) {
                 this._completeCommand(STATUS.NOT_READY);
                 return;
@@ -745,6 +1060,7 @@ export class FDC {
         if (cmdHigh === 0xE0) {
             // Read Track
             this.commandType = CMD_TYPE.TYPE_III;
+            if (this.onHeadLoadSound) this.onHeadLoadSound();
             if (!this.currentDisk || !this.currentDisk.loaded) {
                 this._completeCommand(STATUS.NOT_READY);
                 return;
@@ -757,6 +1073,7 @@ export class FDC {
         if (cmdHigh === 0xF0) {
             // Write Track (Format)
             this.commandType = CMD_TYPE.TYPE_III;
+            if (this.onHeadLoadSound) this.onHeadLoadSound();
             if (!this.currentDisk || !this.currentDisk.loaded) {
                 this._completeCommand(STATUS.NOT_READY);
                 return;
@@ -935,8 +1252,26 @@ export class FDC {
         const sector = disk.getSector(physTrack, side, sectorNum);
         if (!sector || sector.c !== this.trackReg) {
             // Record Not Found (no sector ID matches trackReg on physical track)
+            if (this.logEnabled) {
+                this.log.push({
+                    cyc: this._logCycle, t: 'FIND_RNF',
+                    physTrk: physTrack, tr: this.trackReg,
+                    side, sec: sectorNum,
+                    has: sector ? ('C=' + sector.c) : 'none',
+                });
+            }
             this._completeCommand(STATUS.RNF);
             return;
+        }
+        if (this.logEnabled) {
+            this.log.push({
+                cyc: this._logCycle, t: 'FIND_OK',
+                physTrk: physTrack, side, sec: sectorNum,
+                size: sector.size,
+                d77status: '$' + (sector.status || 0).toString(16).padStart(2, '0'),
+                deleted: sector.deleted ? 1 : 0,
+            });
+            this._logByteCount = 0;
         }
         // Set up data transfer
         this.dataBuffer = sector.data;
@@ -948,9 +1283,12 @@ export class FDC {
         if (sector.deleted) {
             statusExtra |= STATUS.RECORD_TYPE;
         }
-        // D77 status field: reflect CRC errors to FDC status
-        // (e.g., copy-protected sectors with intentional CRC errors)
-        if (sector.status & 0x08) {
+        // D77 status field: reflect errors to FDC status
+        // Copy-protected sectors often have intentional CRC errors.
+        // D77 dumps record this as various non-zero status values
+        // ($B0, $E0, $10, etc.) — not always with the exact CRC bit set.
+        // Any non-zero D77 status indicates an abnormal sector.
+        if (sector.status !== 0) {
             statusExtra |= STATUS.CRC_ERROR;
         }
         // Save completion status for when transfer finishes
@@ -978,31 +1316,19 @@ export class FDC {
         } else {
             // Transfer complete
             if (this.cmdFlags.m) {
-                // Multi-sector: advance to next sector
-                this.sectorReg++;
-                const disk = this.currentDisk;
-                const track = this.headPosition[this.currentDrive];
-                const side = this.currentSide;
-                const nextSector = disk ? disk.getSector(track, side, this.sectorReg) : null;
-
-                if (nextSector) {
-                    this.dataBuffer = nextSector.data;
-                    this.dataIndex = 0;
-                    this.dataLength = nextSector.size;
-
-                    // Present first byte of next sector with byte delay
-                    this.dataReg = this.dataBuffer[0];
-                    this.dataIndex = 1;
-                    this._pendingDrq = true;
-                    this._drqTimer = FDC.BYTE_DELAY;
-                    this.statusReg = STATUS.BUSY;
-                    if (nextSector.deleted) {
-                        this.statusReg |= STATUS.RECORD_TYPE;
-                    }
-                    return;
+                // Multi-sector: advance to next sector with rotational delay
+                if (this.logEnabled) {
+                    this.log.push({
+                        cyc: this._logCycle, t: 'SEC_END',
+                        readBytes: this._logByteCount,
+                        nextSec: (this.sectorReg + 1) & 0xFF,
+                    });
                 }
-                // No more sectors: Record Not Found ends multi-sector
-                this._completeCommand(STATUS.RNF);
+                this.sectorReg++;
+                this.drqFlag = false;
+                this.statusReg = STATUS.BUSY;  // BUSY but no DRQ during gap
+                this.state = FDC_STATE.READ_FIND_SECTOR;
+                this.delayCycles = FDC.MULTI_SECTOR_GAP;
             } else {
                 // Single sector: done (include D77 sector status like CRC errors)
                 this._completeCommand(this._readStatusExtra || 0);
@@ -1059,22 +1385,12 @@ export class FDC {
         } else {
             // Sector write complete
             if (this.cmdFlags.m) {
-                // Multi-sector
+                // Multi-sector: advance to next sector with rotational delay
                 this.sectorReg++;
-                const disk = this.currentDisk;
-                const track = this.headPosition[this.currentDrive];
-                const side = this.currentSide;
-                const nextSector = disk ? disk.getSector(track, side, this.sectorReg) : null;
-
-                if (nextSector) {
-                    this.dataBuffer = nextSector.data;
-                    this.dataIndex = 0;
-                    this.dataLength = nextSector.size;
-                    this.drqFlag = true;
-                    this.statusReg = STATUS.BUSY | STATUS.DRQ;
-                    return;
-                }
-                this._completeCommand(STATUS.RNF);
+                this.drqFlag = false;
+                this.statusReg = STATUS.BUSY;  // BUSY but no DRQ during gap
+                this.state = FDC_STATE.WRITE_FIND_SECTOR;
+                this.delayCycles = FDC.MULTI_SECTOR_GAP;
             } else {
                 this._completeCommand(0);
             }
@@ -1098,8 +1414,19 @@ export class FDC {
         const sectorList = disk.getSectorList(track, side);
 
         if (sectorList.length === 0) {
+            if (this.logEnabled) {
+                this.log.push({ cyc: this._logCycle, t: 'RADDR_RNF', physTrk: track, side });
+            }
             this._completeCommand(STATUS.RNF);
             return;
+        }
+        if (this.logEnabled) {
+            const idx = this.readAddrSectorIndex % sectorList.length;
+            this.log.push({
+                cyc: this._logCycle, t: 'READ_ADDR',
+                physTrk: track, side, retSec: sectorList[idx],
+                listLen: sectorList.length,
+            });
         }
 
         // Rotate through sectors on each Read Address call
@@ -1145,6 +1472,16 @@ export class FDC {
     _forceInterrupt(cmd) {
         const conditions = cmd & 0x0F;
 
+        if (this.logEnabled) {
+            this.log.push({
+                cyc: this._logCycle, t: 'FORCE_INT',
+                byte: '$' + cmd.toString(16).padStart(2, '0'),
+                cond: '$' + conditions.toString(16),
+                wasBusy: (this._logBusyPrev ? 1 : 0),
+                bytesSoFar: this._logTotalBytes,
+            });
+        }
+
         // Abort current command
         this.state = FDC_STATE.IDLE;
         this.drqFlag = false;
@@ -1163,6 +1500,8 @@ export class FDC {
                 this.onIRQ();
             }
         }
+
+        if (this.logEnabled) this._logEdges();
     }
 
     // =========================================================================
@@ -1178,13 +1517,33 @@ export class FDC {
         this.statusReg = errorBits & ~STATUS.BUSY; // Clear BUSY, set error bits
         this.drqFlag = false;
         this.state = FDC_STATE.IDLE;
-        // errorBits logged only in debug mode (removed for performance)
+
+        if (this.logEnabled) {
+            const dur = this._logCycle - this._logCmdStart;
+            const flags = [];
+            if (errorBits & STATUS.RNF) flags.push('RNF');
+            if (errorBits & STATUS.CRC_ERROR) flags.push('CRC');
+            if (errorBits & STATUS.LOST_DATA) flags.push('LOST');
+            if (errorBits & STATUS.WRITE_PROTECT) flags.push('WP');
+            if (errorBits & STATUS.NOT_READY) flags.push('NRDY');
+            if (errorBits & STATUS.RECORD_TYPE) flags.push('DDM');
+            this.log.push({
+                cyc: this._logCycle, t: 'DONE',
+                cmd: this._logCmdName,
+                status: '$' + (errorBits & 0xFF).toString(16).padStart(2, '0'),
+                flags: flags.length ? flags.join('|') : 'OK',
+                durCyc: dur, durUs: +(dur / 2).toFixed(1),
+                bytes: this._logTotalBytes,
+            });
+            this._logEdges();
+        }
 
         // Assert IRQ
         this.irqFlag = true;
         if (this.onIRQ) {
             this.onIRQ();
         }
+        if (this.logEnabled) this._logEdges();
     }
 
     // =========================================================================

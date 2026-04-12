@@ -283,6 +283,19 @@ input[type="file"]::file-selector-button:hover {
     color: #00cc66;
 }
 
+/* File name row (shown below file input) */
+.file-name-row {
+    font-size: 0.75em;
+    color: #666;
+    padding: 2px 4px 4px 4px;
+    margin-top: 2px;
+    word-break: break-all;
+    line-height: 1.2;
+}
+.file-name-row.loaded {
+    color: #00cc66;
+}
+
 /* FDC access LED */
 .fdc-led {
     display: inline-block;
@@ -568,13 +581,7 @@ button:disabled {
     flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
     box-sizing: border-box;
 }
-.fm7-key-enter {
-    background: #1a2a3a; color: #8899aa; border: 1px solid #2a3a4a;
-    border-radius: 2px; font-size: 7px; width: 31px; height: 15px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
-    box-sizing: border-box;
-}
+.fm7-key.enter-wide { width: 31px; }
 .fm7-spacer { width: 15px; height: 15px; flex-shrink: 0; flex-grow: 0; }
 .fm7-key.space { flex: 1; }
 
