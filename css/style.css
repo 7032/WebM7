@@ -101,6 +101,17 @@ canvas#screen {
     gap: 8px;
 }
 
+.toolbar-debug {
+    margin-top: 4px;
+    justify-content: flex-start;
+}
+
+.toolbar-debug-label {
+    margin-right: 4px;
+    color: #8899aa;
+    font-weight: bold;
+}
+
 .toolbar button {
     font-family: inherit;
     font-size: 0.8em;
@@ -661,11 +672,17 @@ button:disabled {
 
 .input-panel.open { display: block; }
 
-#debugPanel {
+#debugPanel,
+#keyPanel,
+#palPanel,
+#sndPanel {
     right: auto;
-    left: 16px;
     width: 336px;
 }
+#debugPanel { left: 16px;  width: 200px; }
+#keyPanel   { left: 48px; bottom: 80px; }
+#palPanel   { left: 80px; bottom: 112px; width: 176px; }
+#sndPanel   { left: 112px; bottom: 144px; }
 
 .draggable-header {
     cursor: grab;
@@ -888,35 +905,38 @@ button:disabled {
 .modal-content li { margin: 4px 0; }
 
 /* ===== Fullscreen ===== */
-.screen-container:fullscreen,
+/* Each vendor prefix MUST be a separate rule — an unrecognised selector
+   in a comma list invalidates the entire rule in CSS. */
+
+/* Container: black background + flex centering */
+.screen-container:fullscreen {
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+}
 .screen-container:-webkit-full-screen {
-    background: #000;
-    border: none;
-    border-radius: 0;
-    padding: 0;
-    margin: 0;
-    box-shadow: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100vw;
-    height: 100vh;
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+}
+.screen-container:-moz-full-screen {
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
 }
 
-.screen-container:fullscreen::before,
+.screen-container:fullscreen::before { display: none; }
 .screen-container:-webkit-full-screen::before { display: none; }
+.screen-container:-moz-full-screen::before { display: none; }
 
-.screen-container:fullscreen canvas#screen,
-.screen-container:-webkit-full-screen canvas#screen {
-    border-radius: 0;
-    width: min(100vw, calc(100vh * 8 / 5));
-    height: min(100vh, calc(100vw * 5 / 8));
-}
+/* Canvas + scanlines: sized by JS (fullscreenchange handler) */
+.screen-container:fullscreen canvas#screen { border-radius: 0; }
+.screen-container:-webkit-full-screen canvas#screen { border-radius: 0; }
+.screen-container:-moz-full-screen canvas#screen { border-radius: 0; }
 
-.screen-container:fullscreen .scanlines,
-.screen-container:-webkit-full-screen .scanlines {
-    top: 0; left: 0;
-    width: 100%;
-    height: 100%;
-    border-radius: 0;
-}
+.screen-container:fullscreen .scanlines { border-radius: 0; }
+.screen-container:-webkit-full-screen .scanlines { border-radius: 0; }
+.screen-container:-moz-full-screen .scanlines { border-radius: 0; }

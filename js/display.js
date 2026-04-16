@@ -816,7 +816,11 @@ export class Display {
             case 0xD404:
                 return { value: 0xFF, sideEffect: 'attention' };
             case 0xD408:
-                this.crtOn = true;
+                if (!this.crtOn) {
+                    this.crtOn = true;
+                    this._lastBlank = false;
+                    this._fullDirty = true;
+                }
                 return { value: 0xFF };
             case 0xD409:
                 this.vramaFlag = true;
@@ -872,6 +876,7 @@ export class Display {
         switch (addr) {
             case 0xD408:
                 this.crtOn = false;
+                this._lastBlank = false;
                 return {};
             case 0xD409:
                 this.vramaFlag = false;
@@ -1196,10 +1201,29 @@ export class Display {
     // ---------------------------------------------------------------
 
     render(canvas, force = false) {
+        if (!this.crtOn) {
+            return this._renderBlank(canvas);
+        }
         if (this.displayMode === DISPLAY_MODE_320) {
             return this._render320x200(canvas, force);
         }
         return this._render640x200(canvas, force);
+    }
+
+    _renderBlank(canvas) {
+        if (this._canvas !== canvas || !this._ctx) {
+            this._canvas = canvas;
+            canvas.width = SCREEN_WIDTH;
+            canvas.height = SCREEN_HEIGHT;
+            this._ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: false });
+            this._imageData = this._ctx.createImageData(SCREEN_WIDTH, SCREEN_HEIGHT);
+            this._pixelBuf = new Uint32Array(this._imageData.data.buffer);
+        }
+        if (this._lastBlank) return;
+        this._pixelBuf.fill(0xFF000000);
+        this._ctx.putImageData(this._imageData, 0, 0);
+        this._lastBlank = true;
+        this._fullDirty = true;
     }
 
     _render640x200(canvas, force = false) {

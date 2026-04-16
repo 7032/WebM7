@@ -17,7 +17,7 @@
 const PSG_CLOCK     = 1228800;       // 1.2288 MHz
 const CLOCK_DIV     = 8;             // Internal divider for tone/noise
 const ENV_DIV       = CLOCK_DIV * 2; // Envelope runs at half the tone rate
-const SAMPLE_RATE   = 48000;
+const SAMPLE_RATE   = 44100;
 
 // AY-3-8910 logarithmic volume table (measured from real chip)
 const VOL = new Float32Array([

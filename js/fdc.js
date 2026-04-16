@@ -16,6 +16,7 @@ const FDC_STATE = {
     READ_TRACK:          9,
     WRITE_TRACK:        10,
     COMPLETE:           11,
+    RNF_WAIT:           12,  // MB8877 5-index-pulse search before asserting RNF
 };
 
 // Command types
@@ -298,8 +299,11 @@ class D77Disk {
 
 export class FDC {
     constructor() {
-        // Drives (up to 4)
+        // Drives (up to 4): active disk (references entry in diskSlots)
         this.disks = [null, null, null, null];
+        // Multi-disk D77 containers: array of D77Disk per drive
+        this.diskSlots     = [[], [], [], []];
+        this.diskSlotIndex = [0, 0, 0, 0];
 
         // Currently selected drive and head
         this.currentDrive = 0;
@@ -362,6 +366,10 @@ export class FDC {
 
         // D77 sector status (CRC errors etc.) for READ completion
         this._readStatusExtra = 0;
+
+        // Debug: byte-level capture for data transfer analysis
+        this._captureEnabled = false;
+        this._captureData = [];  // [{byte, sec, idx}]
 
         // Callback for IRQ generation
         this.onIRQ = null;
@@ -564,16 +572,35 @@ export class FDC {
         console.log(`FDC log saved: ${filename} (${this.log.length} events)`);
     }
 
-    // Timing constants (in CPU cycles at 1.2288 MHz)
+    // Timing constants in microseconds (converted to CPU cycles dynamically)
     // 300 RPM = 200ms/revolution, 16 sectors/track
-    // Average rotational latency per sector: ~6ms = 7373 cycles
-    static ROTATE_DELAY = 7373;
-    // MFM byte transfer delay: 32µs per byte = ~39 cycles
-    static BYTE_DELAY = 39;
+    // Average rotational latency: ~6000µs per sector
+    static ROTATE_DELAY_US = 6000;
+    // MFM byte transfer delay: 32µs per byte (250kbps DD)
+    static BYTE_DELAY_US = 32;
     // Inter-sector gap delay for multi-sector reads/writes
     // Real disk: ~12.5ms between adjacent sectors (200ms / 16 sectors)
-    // Use ROTATE_DELAY (average rotational latency) for realistic timing
-    static MULTI_SECTOR_GAP = 7373;
+    static MULTI_SECTOR_GAP_US = 6000;
+    // MB8877 RNF search window: 5 index pulses (5 revolutions at 300rpm = 1s)
+    // Real hardware keeps BUSY asserted while scanning sector IDs; only after
+    // 5 index pulses without a matching R does it set RNF and raise INTRQ.
+    // Copy-protection routines use this timing as part of their check.
+    static RNF_TIMEOUT_US = 1000000;
+
+    // CPU-clock-dependent cycle counts (set by setCPUClock)
+    static ROTATE_DELAY = 12000;
+    static BYTE_DELAY = 64;
+    static MULTI_SECTOR_GAP = 12000;
+    static RNF_TIMEOUT = 2000000;
+
+    /** Update timing constants for actual CPU clock frequency */
+    static setCPUClock(hz) {
+        const cpm = hz / 1000000;  // cycles per microsecond
+        FDC.ROTATE_DELAY = Math.round(FDC.ROTATE_DELAY_US * cpm);
+        FDC.BYTE_DELAY = Math.round(FDC.BYTE_DELAY_US * cpm);
+        FDC.MULTI_SECTOR_GAP = Math.round(FDC.MULTI_SECTOR_GAP_US * cpm);
+        FDC.RNF_TIMEOUT = Math.round(FDC.RNF_TIMEOUT_US * cpm);
+    }
 
     // =========================================================================
     // Disk Management
@@ -592,37 +619,82 @@ export class FDC {
             return false;
         }
 
-        const disk = new D77Disk();
-        let success = false;
+        const slots = [];
 
-        // Try D77 format first: check if the size field at 0x1C matches the actual size
+        // Try D77 container: walk sequential headers using disk_size @ 0x1C.
+        // A multi-disk D77 concatenates N disk images, each with its own header.
         if (arrayBuffer.byteLength >= D77_HEADER_SIZE) {
-            const view = new DataView(arrayBuffer);
-            const declaredSize = view.getUint32(0x1C, true);
-            if (declaredSize === arrayBuffer.byteLength) {
-                success = disk.parseD77(arrayBuffer);
-                if (success) {
-                    console.log(`FDC: Drive ${driveNum}: D77 image loaded - "${disk.name}", ${disk.numTracks} tracks, ${disk.numSides} side(s)`);
-                }
+            const fullView = new DataView(arrayBuffer);
+            let pos = 0;
+            while (pos + D77_HEADER_SIZE <= arrayBuffer.byteLength) {
+                const declaredSize = fullView.getUint32(pos + 0x1C, true);
+                if (declaredSize < D77_HEADER_SIZE) break;
+                if (pos + declaredSize > arrayBuffer.byteLength) break;
+                const slice = arrayBuffer.slice(pos, pos + declaredSize);
+                const d = new D77Disk();
+                if (!d.parseD77(slice)) break;
+                slots.push(d);
+                pos += declaredSize;
+            }
+            // Fully consumed → valid D77 (single or multi-disk)
+            if (slots.length > 0 && pos !== arrayBuffer.byteLength) {
+                // Partial parse: reject so fallback paths can try
+                slots.length = 0;
             }
         }
 
-        // If D77 parsing failed or wasn't attempted, try raw 2D
-        if (!success) {
-            success = disk.parseRaw2D(arrayBuffer);
-            if (success) {
-                console.log(`FDC: Drive ${driveNum}: Raw 2D image loaded, ${disk.numTracks} tracks, ${disk.numSides} side(s)`);
-            }
+        // Fallback: raw 2D
+        if (slots.length === 0) {
+            const d = new D77Disk();
+            if (d.parseRaw2D(arrayBuffer)) slots.push(d);
         }
 
-        if (success) {
-            this.disks[driveNum] = disk;
-            if (this.onDiskInsert) this.onDiskInsert(driveNum);
-        } else {
+        if (slots.length === 0) {
             console.error(`FDC: Failed to load disk in drive ${driveNum}`);
+            return false;
         }
 
-        return success;
+        this.diskSlots[driveNum] = slots;
+        this.diskSlotIndex[driveNum] = 0;
+        this.disks[driveNum] = slots[0];
+
+        if (slots.length > 1) {
+            console.log(`FDC: Drive ${driveNum}: Multi-disk D77 container, ${slots.length} disks: [${slots.map(s => `"${s.name}"`).join(', ')}]`);
+        } else {
+            const d = slots[0];
+            console.log(`FDC: Drive ${driveNum}: Disk loaded - "${d.name}", ${d.numTracks} tracks, ${d.numSides} side(s)`);
+        }
+        if (this.onDiskInsert) this.onDiskInsert(driveNum);
+        return true;
+    }
+
+    /**
+     * Select an alternate disk from a multi-disk D77 container.
+     * @param {number} driveNum
+     * @param {number} diskIdx - 0-based index into diskSlots
+     * @returns {boolean} true if switched
+     */
+    selectDisk(driveNum, diskIdx) {
+        if (driveNum < 0 || driveNum > 3) return false;
+        const slots = this.diskSlots[driveNum];
+        if (!slots || diskIdx < 0 || diskIdx >= slots.length) return false;
+        this.diskSlotIndex[driveNum] = diskIdx;
+        this.disks[driveNum] = slots[diskIdx];
+        if (this.onDiskInsert) this.onDiskInsert(driveNum);
+        return true;
+    }
+
+    /**
+     * Get disk names in the multi-disk container for a drive.
+     * @param {number} driveNum
+     * @returns {{names: string[], index: number}}
+     */
+    getDiskList(driveNum) {
+        const slots = this.diskSlots[driveNum] || [];
+        return {
+            names: slots.map(d => d.name || ''),
+            index: this.diskSlotIndex[driveNum] || 0,
+        };
     }
 
     /**
@@ -633,6 +705,8 @@ export class FDC {
         if (driveNum >= 0 && driveNum <= 3) {
             const hadDisk = !!this.disks[driveNum];
             this.disks[driveNum] = null;
+            this.diskSlots[driveNum] = [];
+            this.diskSlotIndex[driveNum] = 0;
             if (hadDisk && this.onDiskEject) this.onDiskEject(driveNum);
         }
     }
@@ -678,6 +752,9 @@ export class FDC {
                     value = this.dataReg;
                     this.drqFlag = false;
                     this.statusReg &= ~STATUS.DRQ;
+                    if (this._captureEnabled && this.state === FDC_STATE.READ_TRANSFER) {
+                        this._captureData.push(value);
+                    }
                     if (this.logEnabled) {
                         this._logByteCount++;
                         this._logTotalBytes++;
@@ -804,6 +881,10 @@ export class FDC {
                 if (this.drqFlag && (this.state === FDC_STATE.READ_TRANSFER)) {
                     // Previous DRQ was not consumed — lost data
                     this.statusReg |= STATUS.LOST_DATA;
+                    this._lostDataCount = (this._lostDataCount || 0) + 1;
+                    if (this._lostDataCount === 1) {
+                        console.warn(`[FDC] LOST_DATA at byte ${this.dataIndex}/${this.dataLength} T${this.headPosition[this.currentDrive]} S${this.currentSide} sec${this.sectorReg}`);
+                    }
                 }
                 this.drqFlag = true;
                 this.statusReg |= STATUS.DRQ;
@@ -817,6 +898,10 @@ export class FDC {
             if (this._drqAge >= FDC.BYTE_DELAY) {
                 this._drqAge = 0;
                 this.statusReg |= STATUS.LOST_DATA;
+                this._lostDataCount = (this._lostDataCount || 0) + 1;
+                if (this._lostDataCount === 1) {
+                    console.warn(`[FDC] LOST_DATA timeout at byte ${this.dataIndex}/${this.dataLength} T${this.headPosition[this.currentDrive]} S${this.currentSide} sec${this.sectorReg}`);
+                }
                 if (this.state === FDC_STATE.READ_TRANSFER) {
                     this._advanceRead();
                 } else if (this.state === FDC_STATE.WRITE_TRANSFER) {
@@ -889,6 +974,11 @@ export class FDC {
                 // Format track; stub
                 this._completeCommand(0);
                 break;
+
+            case FDC_STATE.RNF_WAIT:
+                // 5-index-pulse search window elapsed without matching sector.
+                this._completeCommand(STATUS.RNF);
+                break;
         }
         if (this.logEnabled) this._logEdges();
     }
@@ -932,6 +1022,7 @@ export class FDC {
 
         // If busy, ignore new commands (except Force Interrupt above)
         if (this.statusReg & STATUS.BUSY) {
+            console.warn(`[FDC] CMD $${cmd.toString(16)} IGNORED (busy)`);
             return;
         }
 
@@ -977,12 +1068,14 @@ export class FDC {
 
             if (cmdHigh === 0x00) {
                 // Restore: seek to track 0
+                console.log(`[FDC] RESTORE (head at T${this.headPosition[this.currentDrive]})`);
                 this.dataReg = 0; // Target track = 0
                 this.trackReg = 0xFF; // Start from "unknown"
                 this.state = FDC_STATE.SEEK_STEPPING;
                 this._beginSeekRestore();
             } else if (cmdHigh === 0x10) {
                 // Seek: seek to track in data register
+                console.log(`[FDC] SEEK T${this.trackReg}→T${this.dataReg}`);
                 this.state = FDC_STATE.SEEK_STEPPING;
                 this._beginSeek();
             } else if (cmdHigh <= 0x30) {
@@ -1240,27 +1333,37 @@ export class FDC {
             return;
         }
 
-        // Real WD279x scans address fields on the CURRENT physical track for
-        // a sector header whose track-ID matches the track register. If the
-        // game forgot to seek (or seeks elsewhere) the read returns RNF on
-        // real hardware. Looking up by `headPosition` only would silently
-        // return data from the wrong physical track and corrupt the load.
+        // Look up the sector on the CURRENT physical track by sector number.
+        // MB8877 READ SECTOR scans address fields on the physical track.
+        // Some games write a different value to trackReg before READ without
+        // issuing SEEK (e.g. copy-protection loaders that set trackReg=0
+        // while the head is at track N). On real hardware, data is returned
+        // as long as the sector R field matches sectorReg — the C-field vs
+        // trackReg comparison does not prevent data transfer on MB8877.
         const physTrack = this.headPosition[this.currentDrive];
         const side = this.currentSide;
         const sectorNum = this.sectorReg;
 
+        console.log(`[FDC] READ T${physTrack} S${side} sec${sectorNum} (trk=${this.trackReg})`);
+
         const sector = disk.getSector(physTrack, side, sectorNum);
-        if (!sector || sector.c !== this.trackReg) {
-            // Record Not Found (no sector ID matches trackReg on physical track)
+        if (!sector) {
+            console.warn(`[FDC] RNF! T${physTrack} S${side} sec${sectorNum} (no sector) — entering 5-index-pulse search window`);
             if (this.logEnabled) {
                 this.log.push({
                     cyc: this._logCycle, t: 'FIND_RNF',
                     physTrk: physTrack, tr: this.trackReg,
                     side, sec: sectorNum,
-                    has: sector ? ('C=' + sector.c) : 'none',
+                    has: 'none',
                 });
             }
-            this._completeCommand(STATUS.RNF);
+            // MB8877: on missing sector, keep BUSY asserted while searching
+            // for 5 index pulses (5 revolutions ≈ 1 s at 300rpm), then assert
+            // RNF + INTRQ. Copy-protection routines can depend on this delay.
+            this.statusReg = STATUS.BUSY;
+            this.drqFlag = false;
+            this.state = FDC_STATE.RNF_WAIT;
+            this.delayCycles = FDC.RNF_TIMEOUT;
             return;
         }
         if (this.logEnabled) {
@@ -1277,6 +1380,7 @@ export class FDC {
         this.dataBuffer = sector.data;
         this.dataIndex = 0;
         this.dataLength = sector.size;
+        this._lostDataCount = 0;
 
         // Check deleted data mark and D77 sector status
         let statusExtra = 0;
@@ -1318,12 +1422,15 @@ export class FDC {
             if (this.cmdFlags.m) {
                 // Multi-sector: advance to next sector with rotational delay
                 if (this.logEnabled) {
-                    this.log.push({
+                    const secEnd = {
                         cyc: this._logCycle, t: 'SEC_END',
                         readBytes: this._logByteCount,
                         nextSec: (this.sectorReg + 1) & 0xFF,
-                    });
+                    };
+                    if (this._lostDataCount > 0) secEnd.lostBytes = this._lostDataCount;
+                    this.log.push(secEnd);
                 }
+                this._lostDataCount = 0;
                 this.sectorReg++;
                 this.drqFlag = false;
                 this.statusReg = STATUS.BUSY;  // BUSY but no DRQ during gap
@@ -1331,7 +1438,10 @@ export class FDC {
                 this.delayCycles = FDC.MULTI_SECTOR_GAP;
             } else {
                 // Single sector: done (include D77 sector status like CRC errors)
-                this._completeCommand(this._readStatusExtra || 0);
+                // Also report LOST_DATA in final status (real WD279x does this)
+                let finalStatus = this._readStatusExtra || 0;
+                if (this._lostDataCount > 0) finalStatus |= STATUS.LOST_DATA;
+                this._completeCommand(finalStatus);
             }
         }
     }
@@ -1354,7 +1464,11 @@ export class FDC {
 
         const sector = disk.getSector(track, side, sectorNum);
         if (!sector) {
-            this._completeCommand(STATUS.RNF);
+            // MB8877: search 5 index pulses before RNF (same as read path).
+            this.statusReg = STATUS.BUSY;
+            this.drqFlag = false;
+            this.state = FDC_STATE.RNF_WAIT;
+            this.delayCycles = FDC.RNF_TIMEOUT;
             return;
         }
 
@@ -1417,7 +1531,11 @@ export class FDC {
             if (this.logEnabled) {
                 this.log.push({ cyc: this._logCycle, t: 'RADDR_RNF', physTrk: track, side });
             }
-            this._completeCommand(STATUS.RNF);
+            // MB8877: unformatted track — search 5 index pulses before RNF.
+            this.statusReg = STATUS.BUSY;
+            this.drqFlag = false;
+            this.state = FDC_STATE.RNF_WAIT;
+            this.delayCycles = FDC.RNF_TIMEOUT;
             return;
         }
         if (this.logEnabled) {
@@ -1518,6 +1636,17 @@ export class FDC {
         this.drqFlag = false;
         this.state = FDC_STATE.IDLE;
 
+        // Always log completion status for diagnostics
+        {
+            const flags = [];
+            if (errorBits & STATUS.RNF) flags.push('RNF');
+            if (errorBits & STATUS.CRC_ERROR) flags.push('CRC');
+            if (errorBits & STATUS.LOST_DATA) flags.push('LOST');
+            if (errorBits & STATUS.NOT_READY) flags.push('NRDY');
+            const f = flags.length ? flags.join('|') : 'OK';
+            console.log(`[FDC] DONE status=$${(errorBits & 0xFF).toString(16).padStart(2,'0')} ${f}`);
+        }
+
         if (this.logEnabled) {
             const dur = this._logCycle - this._logCmdStart;
             const flags = [];
@@ -1527,14 +1656,16 @@ export class FDC {
             if (errorBits & STATUS.WRITE_PROTECT) flags.push('WP');
             if (errorBits & STATUS.NOT_READY) flags.push('NRDY');
             if (errorBits & STATUS.RECORD_TYPE) flags.push('DDM');
-            this.log.push({
+            const entry = {
                 cyc: this._logCycle, t: 'DONE',
                 cmd: this._logCmdName,
                 status: '$' + (errorBits & 0xFF).toString(16).padStart(2, '0'),
                 flags: flags.length ? flags.join('|') : 'OK',
                 durCyc: dur, durUs: +(dur / 2).toFixed(1),
                 bytes: this._logTotalBytes,
-            });
+            };
+            if (this._lostDataCount > 0) entry.lostBytes = this._lostDataCount;
+            this.log.push(entry);
             this._logEdges();
         }
 

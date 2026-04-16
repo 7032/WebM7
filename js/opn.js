@@ -15,10 +15,13 @@
 // =============================================================================
 
 const MASTER_CLOCK  = 1228800;
-const OPN_EXT_CLOCK_AV = 2457600;   // YM2203 external clock on FM77AV (4.9152 MHz / 2)
+const OPN_EXT_CLOCK_AV = 2457600;   // YM2203 synthesis clock path (preserved for pitch)
 const CPU_CLOCK_AV     = 2000000;   // FM77AV CPU clock (2 MHz)
-const OPN_CPU_RATIO_AV = OPN_EXT_CLOCK_AV / CPU_CLOCK_AV;  // 1.2288
-const SAMPLE_RATE   = 48000;
+// Timer reference clock — YM2203 timer formula uses the external chip clock,
+// which on FM-7/77 hardware is 1.2288 MHz (half of our synthesis-side constant).
+const OPN_TIMER_CLOCK_AV = 1228800;
+const OPN_CPU_RATIO_AV = OPN_TIMER_CLOCK_AV / CPU_CLOCK_AV;  // 0.6144
+const SAMPLE_RATE   = 44100;
 
 const NUM_CHANNELS  = 3;
 
@@ -1008,6 +1011,7 @@ export class OPN {
         this._status = 0;
         this._regtc = 0;        // Timer control register ($27) bits 6-7
         this._prescale = 0;     // Current prescaler index
+        this._prescalerScale = 6; // Timer scale multiplier (6/3/2 for ÷6/÷3/÷2)
 
         // Clock/rate
         this._clock = MASTER_CLOCK;
@@ -1117,10 +1121,19 @@ export class OPN {
 
     _configurePrescaler(p) {
         const dividers = [[6, 4], [3, 2], [2, 1]];
+        const timerScales = [6, 3, 2];
         const lfoRateDivisors = [109, 78, 72, 68, 63, 45, 9, 6];
 
         if (this._prescale !== p) {
             this._prescale = p;
+            this._prescalerScale = timerScales[p];
+            // Recompute active timer periods on prescaler change
+            if (this._timerAEn) {
+                this._timerAPeriod = 12 * this._prescalerScale * (1024 - this._timerA);
+            }
+            if (this._timerBEn) {
+                this._timerBPeriod = 192 * this._prescalerScale * (256 - this._timerB);
+            }
             const fmclock = Math.floor(this._clock / dividers[p][0] / 12);
 
             if (this._interpolation) {
@@ -1173,6 +1186,11 @@ export class OPN {
         this._timerAIRQ = false;
         this._timerBIRQ = false;
 
+        // BUSY flag countdown in CPU cycles.
+        // YM2203 holds status bit 7 = BUSY for ~83 φM cycles (φM = fclock/6).
+        // At 2.4576 MHz external, that's ~202 μs → ~405 CPU cycles @ 2 MHz.
+        this._busyCycles = 0;
+
         this._fnum = [0, 0, 0];
         this._fnum2.fill(0);
         this._fnum3 = [0, 0, 0];
@@ -1204,6 +1222,11 @@ export class OPN {
         value &= 0xFF;
         this._regs[reg] = value;
 
+        // YM2203 asserts BUSY for ~83 external clock cycles after a register write.
+        // cpuCycles = 83 / _timerClockRatio (ratio = Fext / Fcpu).
+        // At Fext=1.2288 MHz, Fcpu=2 MHz → 83/0.6144 ≈ 135 CPU cycles ≈ 67 μs.
+        this._busyCycles = Math.round(83 / this._timerClockRatio);
+
         // Timer registers — update reload value (takes effect on next overflow)
         if (reg === 0x24) {
             this._timerA = (this._timerA & 0x03) | (value << 2);
@@ -1231,11 +1254,11 @@ export class OPN {
 
             // On fresh enable: load period and reset count
             if (this._timerAEn && !prevAEn) {
-                this._timerAPeriod = 72 * (1024 - this._timerA);
+                this._timerAPeriod = 12 * this._prescalerScale * (1024 - this._timerA);
                 this._timerACount = 0;
             }
             if (this._timerBEn && !prevBEn) {
-                this._timerBPeriod = 1152 * (256 - this._timerB);
+                this._timerBPeriod = 192 * this._prescalerScale * (256 - this._timerB);
                 this._timerBCount = 0;
             }
 
@@ -1366,7 +1389,8 @@ export class OPN {
     }
 
     readStatus() {
-        return this._status & 0x03;
+        const busy = this._busyCycles > 0 ? 0x80 : 0;
+        return (this._status & 0x03) | busy;
     }
 
     get timerAFlag() { return !!(this._status & 0x01); }
@@ -1435,6 +1459,11 @@ export class OPN {
     // =========================================================================
 
     _advanceTimers(cpuCycles) {
+        if (this._busyCycles > 0) {
+            this._busyCycles -= cpuCycles;
+            if (this._busyCycles < 0) this._busyCycles = 0;
+        }
+
         // YM2203 Timer A/B periods in OPN external clock cycles.
         // Timer A: 72 × (1024-N) OPN clocks  (YM2203 internal /72 prescaler)
         // Timer B: 1152 × (256-N) OPN clocks  (YM2203 internal /1152 prescaler)
@@ -1449,11 +1478,13 @@ export class OPN {
                 this._timerACount += opnCycles;
                 while (this._timerACount >= periodA) {
                     this._timerACount -= periodA;
-                    if (this._timerAIRQ) this._status |= 0x01;
+                    // Status flag is set on overflow regardless of IRQ enable.
+                    // IRQ enable only gates the external /IRQ pin assertion.
+                    this._status |= 0x01;
                     // CSM mode: Timer A overflow triggers key-on for FM ch3
                     this._handleCSMTrigger();
                     // Reload: apply any pending timer value change
-                    this._timerAPeriod = 72 * (1024 - this._timerA);
+                    this._timerAPeriod = 12 * this._prescalerScale * (1024 - this._timerA);
                 }
             }
         }
@@ -1464,8 +1495,8 @@ export class OPN {
                 this._timerBCount += opnCycles;
                 while (this._timerBCount >= periodB) {
                     this._timerBCount -= periodB;
-                    if (this._timerBIRQ) this._status |= 0x02;
-                    this._timerBPeriod = 1152 * (256 - this._timerB);
+                    this._status |= 0x02;
+                    this._timerBPeriod = 192 * this._prescalerScale * (256 - this._timerB);
                 }
             }
         }

@@ -171,6 +171,7 @@ export class FM7 {
         this._subROM_ASize    = 0;       // Actual size of loaded Type-A ROM
         this._subROM_BSize    = 0;       // Actual size of loaded Type-B ROM
         this._initiatorActive = false;   // Initiator ROM mapped at $FE00-$FFFF
+        this._initiatorHandoffDone = false; // Sub-monitor switch + log only on first disable
         this._fd10Reg         = 0;       // FM77AV extended sub CPU mode register ($FD10)
         this._subMonitorType  = SUB_MONITOR_C; // Sub monitor: C=0, A=1, B=2
         this._cgRomBank       = 0;       // CG ROM bank (0-3, bits 0-1 of $D430)
@@ -207,8 +208,9 @@ export class FM7 {
 
         // --- OPN (YM2203) / FM Sound Card ---
         this._fmCardEnabled = false; // FM sound card: off by default for FM-7
-        this._opnAddrLatch = 0;
-        this._opnDataBus   = 0;
+        this._opnAddrLatch = 0;      // selreg (latched register number)
+        this._opnDataBus   = 0;      // seldat (data bus latch)
+        this._opnPState    = 0;      // command pstate: 0=INACTIVE 1=READDAT 2=WRITEDAT 3=ADDRESS 4=READSTAT 9=JOYSTICK
         this._opnRegs      = new Uint8Array(256);
         this._opnRegs[0x0E] = 0xFF;     // Port A: all released (active low)
         this._opnRegs[0x0F] = 0xFF;     // Port B: no joystick selected
@@ -216,12 +218,32 @@ export class FM7 {
         this._gamepadState[0] = 0xFF;   // All buttons released (active low)
         this._gamepadState[1] = 0xFF;
 
+        // --- PTM (MC6840 Programmable Timer Module) at $FDE0-$FDE7 ---
+        // FM77AV: used for periodic timer IRQ and mouse timing.
+        // Routes IRQ to main CPU via $FD17 bit 2.
+        // Reference: Motorola MC6840 datasheet, FM77AV Technical Manual.
+        // Register map (addr = addr - 0xFDE0):
+        //   0 W: CR1 if CR2[0]=1 else CR3;  R: no-op ($FF)
+        //   1 W: CR2;                       R: status register
+        //   2 W: MSB write buffer (shared); R: T1 counter MSB (latches LSB to buffer)
+        //   3 W: T1 LSB (loads latch = {msbBuf, val}, resets T1); R: T1 LSB buffered
+        //   4/5: T2 same pattern
+        //   6/7: T3 same pattern
+        this._ptmCR      = new Uint8Array(3);  // CR1, CR2, CR3
+        this._ptmLatch   = new Uint16Array(3); // T1-T3 reload latches
+        this._ptmCounter = new Uint16Array(3); // T1-T3 current counter
+        this._ptmLsbBuf  = new Uint8Array(3);  // T1-T3 LSB read buffer (captured at MSB read)
+        this._ptmMsbWBuf = 0;                  // Shared MSB write buffer
+        this._ptmStatus  = 0;                  // bit0-2: timer IRQ flags; bit7 = any IRQ & enabled
+        this._ptmCycleAcc = 0;                 // Fractional cycle accumulator (PTM clock = 1MHz ≈ main/2)
+
         // IRQ / FIRQ flags for main CPU
         this._timerIRQ    = false;  // Timer IRQ pending (cleared by reading $FD03)
         this._opnIrqLatch = false;  // OPN timer IRQ latch (edge-triggered, cleared by $FD03 read)
         this._opnIrqPrev  = false;  // Previous OPN IRQ state for edge detection
         this._fdcIrqLatch = false;  // FDC IRQ latch (edge-triggered, cleared by reading $FD18)
         this._fdcIrqPrev  = false;  // Previous FDC IRQ state for edge detection
+        this._fdcDrqPrev  = false;  // Previous FDC DRQ state for NMI edge detection
         this._irqMaskReg  = 0;      // $FD02 keyboard IRQ mask (bit 0)
 
         // Emulation loop state
@@ -231,6 +253,7 @@ export class FM7 {
         this._fpsCounter  = 0;
         this._fpsTime     = 0;
         this._currentFPS  = 0;
+        this._lastFrameTime = 0;
 
         // --- Wire components together ---
         this._wireMemory();
@@ -272,6 +295,11 @@ export class FM7 {
             if (addr >= 0xFE00 && addr <= 0xFFFF) {
                 return this.initiateROM[(addr - 0xFE00) + 0x1E00];
             }
+        }
+
+        // FM77AV TWR: $7C00-$7FFF window — priority over MMR
+        if (this._twrFlag && addr >= 0x7C00 && addr <= 0x7FFF) {
+            return this._twrRead(addr);
         }
 
         // FM77AV MMR: remap through segment table
@@ -376,6 +404,18 @@ export class FM7 {
         addr &= 0xFFFF;
         val &= 0xFF;
 
+        // Debug: RAM write watchpoint
+        if (this._watchAddr && addr >= this._watchAddr && addr < this._watchAddr + this._watchLen) {
+            const pc = this.mainCPU.pc || 0;
+            console.log(`[WATCH] W $${addr.toString(16)}=$${val.toString(16)} PC=$${pc.toString(16)}`);
+        }
+
+        // FM77AV TWR: $7C00-$7FFF window — priority over MMR
+        if (this._twrFlag && addr >= 0x7C00 && addr <= 0x7FFF) {
+            this._twrWrite(addr, val);
+            return;
+        }
+
         // FM77AV MMR: remap writes through segment table
         // MMR applies to $0000-$FBFF only; $FC00+ (RAM/shared/I/O) bypasses MMR
         if (this._mmrEnabled && addr < 0xFC00) {
@@ -478,12 +518,12 @@ export class FM7 {
                 status &= ~0x04;
                 this._timerIRQ = false;
             }
-            // bit 3: extended interrupt (OPN timer A/B overflow)
-            // Reading $FD03 clears the edge-triggered IRQ latch.
-            if (this._opnIrqLatch) {
-                status &= ~0x08;
-                this._opnIrqLatch = false;
-            }
+            // bit 3: extended interrupt (OPN timer A/B overflow).
+            // Reference ($FD03 read) only reports the flag; it does NOT
+            // clear the OPN IRQ source. The IRQ is acknowledged by writing
+            // OPN register $27 with reset bits ($10/$20), which clears the
+            // OPN status — our auto-clear path then drops the latch.
+            if (this._opnIrqLatch) status &= ~0x08;
             return status;
         }
 
@@ -493,7 +533,8 @@ export class FM7 {
         if (addr === 0xFD17) {
             let val = 0xFF;
             if (this._opnIrqLatch) val &= ~0x08;
-            // PTM not implemented; bit 2 stays high
+            // PTM IRQ source: active low when any enabled timer has pending IRQ
+            if (this._ptmStatus & 0x80) val &= ~0x04;
             return val;
         }
 
@@ -514,10 +555,6 @@ export class FM7 {
             }
             // bit 1 = break key (active low: 0=pressed, 1=not pressed)
             if (this._breakKey) ret &= ~0x02;
-            // FM77AV: clear subreset_flag when initiator ROM is no longer active
-            if (this.isFM77AV && this._subResetFlag && !this._initiatorActive) {
-                this._subResetFlag = false;
-            }
             return ret;
         }
 
@@ -554,10 +591,13 @@ export class FM7 {
             return 0xFF;
         }
 
-        // $FD0F: Reading enables BASIC ROM overlay
+        // $FD0F: Reading enables BASIC ROM overlay at $8000-$FBFF
         if (addr === FD0F_ROM_SELECT) {
+            if (this._loadTraceEnabled && !this._basicRomEnabled) {
+                this._loadTrace.push({ t: 'ROM_ON', pc: this.mainCPU.pc });
+            }
             this._basicRomEnabled = true;
-            return 0xFE;
+            return 0xFF;
         }
 
         // FM77AV: $FD10 read - Extended sub CPU status
@@ -620,16 +660,31 @@ export class FM7 {
             return this.psg.readData();
         }
 
-        // $FD15: OPN status register / BDIR-BC1 read
+        // $FD15: OPN command register — write-only (BDIR/BC1/status-read mode).
+        // Reads return open bus ($FF); OPN status is surfaced on $FD16 data bus
+        // via bit2 "status read" mode.
         if (addr === 0xFD15) {
-            if (!this._fmCardEnabled) return 0xFF;
-            return this.opn.readStatus();
+            return 0xFF;
         }
 
-        // $FD16: OPN data bus read
+        // $FD16: OPN data bus read — dispatch on pstate
         if (addr === 0xFD16) {
             if (!this._fmCardEnabled) return 0xFF;
-            return this._opnDataBus;
+            switch (this._opnPState) {
+                case 0x04: // READSTAT: live status each read
+                    return this.opn.readStatus();
+                case 0x09: { // JOYSTICK: only selreg==14 yields joystick data
+                    if (this._opnAddrLatch === 14) {
+                        const portB = this._opnRegs[0x0F] & 0xF0;
+                        if (portB === 0x20) return this._gamepadState[0];
+                        if (portB === 0x50) return this._gamepadState[1];
+                        return 0xFF;
+                    }
+                    return 0x00;
+                }
+                default: // INACTIVE / READDAT / WRITEDAT / ADDRESS → seldat
+                    return this._opnDataBus;
+            }
         }
 
         // $FD06/$FD07: RS-232C USART (not installed: return open bus)
@@ -660,6 +715,11 @@ export class FM7 {
 
         // $FDFD-$FDFF: Boot mode / extended registers (stub)
         if (addr >= 0xFDFD) return 0xFF;
+
+        // PTM (MC6840) $FDE0-$FDE7
+        if (addr >= 0xFDE0 && addr <= 0xFDE7) {
+            return this._ptmRead(addr - 0xFDE0);
+        }
 
         // FM77AV: MMR/TWR registers ($FD80-$FD9F)
         // $FD80-$FD8F: Segment registers for current bank (selected by $FD90)
@@ -761,6 +821,9 @@ export class FM7 {
 
         // $FD0F: Writing disables BASIC ROM overlay
         if (addr === FD0F_ROM_SELECT) {
+            if (this._loadTraceEnabled && this._basicRomEnabled) {
+                this._loadTrace.push({ t: 'ROM_OFF', pc: this.mainCPU.pc });
+            }
             if (this._basicRomEnabled) {
                 console.log(`[ROM] BASIC ROM DISABLED (write $FD0F) at PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
             }
@@ -768,26 +831,30 @@ export class FM7 {
             return;
         }
 
-        // FM77AV: $FD10 write - Mode control / Initiator ROM disable
-        // Writing to $FD10 disables the Initiator ROM overlay,
-        // returning $FE00-$FFFF to normal boot ROM and $6000-$7FFF to RAM.
+        // FM77AV: $FD10 write - Mode control / Initiator ROM overlay toggle
+        // bit 1 controls the Initiator ROM overlay:
+        //   bit 1 = 0: Initiator ROM overlay active at $6000-$7FFF / $FE00-$FFFF
+        //   bit 1 = 1: Initiator disabled, underlying RAM/ROM visible
+        // The overlay can be toggled both ways (Disk BASIC machine detection
+        // temporarily re-enables it to probe the reset vector).
         if (addr === 0xFD10 && this.isFM77AV) {
             this._fd10Reg = val;
-            if (this._initiatorActive) {
+            const wantDisable = (val & 0x02) !== 0;
+            if (this._initiatorActive && wantDisable) {
                 this._initiatorActive = false;
-                // After Initiator hands off to F-BASIC, switch sub-CPU to
-                // Type-C (FM-7 compatible) mode for full FM-7 software support.
-                // The Initiator ROM boots with Type-A but F-BASIC and FM-7
-                // tape software expect Type-C sub-system behavior.
-                if (this._bootMode === 'basic') {
-                    this._mainIOWrite(FD13_SUB_BANK, SUB_MONITOR_C);
-                    // Re-apply BASIC boot keyboard mode (the FD13 handler
-                    // unconditionally sets scan-code mode, but BASIC needs
-                    // ASCII mode to type at the F-BASIC prompt).
-                    this.keyboard._enableBreakCodes = false;
-                    this.keyboard._useScanCodes = false;
+                // Handoff side effects (sub monitor Type-C switch for BASIC
+                // boot) happen only the first time the initiator is disabled.
+                if (!this._initiatorHandoffDone) {
+                    this._initiatorHandoffDone = true;
+                    if (this._bootMode === 'basic') {
+                        this._mainIOWrite(FD13_SUB_BANK, SUB_MONITOR_C);
+                        this.keyboard._enableBreakCodes = false;
+                        this.keyboard._useScanCodes = false;
+                    }
+                    console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
                 }
-                console.log(`FM77AV: Initiator disabled via $FD10 write ($${val.toString(16)}), boot ROM now active`);
+            } else if (!this._initiatorActive && !wantDisable && this.romLoaded.initiate) {
+                this._initiatorActive = true;
             }
             return;
         }
@@ -809,6 +876,7 @@ export class FM7 {
             this._subMonitorType = bank;
             // Reset sub CPU
             this._subBusy = true;
+            this._subBusyWasCleared = false;
             this._subHalted = false;
             this._subResetFlag = true;
 
@@ -850,24 +918,10 @@ export class FM7 {
             // Trigger full display refresh
             this.display._fullDirty = true;
 
-            // Sub ROM bank → keyboard MCU mode mapping.
-            // Empirically: native FM77AV games that run with Type-A use
-            // 9BIT/ASCII (e.g. BUG08, BUG10). Games that switch to Type-C
-            // (often for 320x200 mode) hard-code FM77AV scan codes in
-            // their key tables (e.g. BUG04). Reset the keyboard MCU
-            // accordingly when the bank changes, unless the game has
-            // already issued an explicit $D431 mode command this session.
-            if (!this._keyEncFormatExplicit) {
-                if (bank === SUB_MONITOR_C) {
-                    this.keyboard._useScanCodes = true;
-                    this.keyboard._enableBreakCodes = true;
-                    this._keyEncFormat = 2;
-                } else {
-                    this.keyboard._useScanCodes = false;
-                    this.keyboard._enableBreakCodes = false;
-                    this._keyEncFormat = 0;
-                }
-            }
+            // Keyboard MCU mode is NOT tied to the sub ROM bank.
+            // Reference resets keyboard to 9BIT (ASCII) at power-on and
+            // only changes it via explicit $D431 command $00. Games that
+            // need scan codes must request them explicitly.
 
             this.subCPU.reset();
             this.scheduler.setSubHalted(false);
@@ -963,43 +1017,45 @@ export class FM7 {
             return;
         }
 
-        // $FD15: OPN command register (FM7 Programmers Guide §7.3)
+        // $FD15: OPN command register — 4-bit enum decode
         if (addr === 0xFD15 && !this._fmCardEnabled) return;
-        //   bit1:0 (BDIR/BC1): $00=Inactive, $01=Read reg, $02=Write reg, $03=Address Latch
-        //   bit2: Status read — loads OPN status register onto $FD16 data bus
         if (addr === 0xFD15) {
-            // bit2: OPN status read mode — demo reads status via STA #$04,$FD15 / LDA $FD16
-            if (val & 0x04) {
-                this._opnDataBus = this.opn.readStatus();
-            }
-            switch (val & 0x03) {
-                case 0x03: // Address Latch: latch data bus as register number
-                    this._opnAddrLatch = this._opnDataBus & 0xFF;
+            const cmd = val & 0x0F;
+            switch (cmd) {
+                case 0x00: // INACTIVE
+                    this._opnPState = 0x00;
                     break;
-                case 0x02: // Write: write data bus to latched register
-                    this.opn.writeReg(this._opnAddrLatch, this._opnDataBus);
-                    // Also keep local copy for port A/B joystick reads
-                    this._opnRegs[this._opnAddrLatch] = this._opnDataBus;
-                    // SSG registers ($00-$0F): forward to PSG for audio output.
-                    // PSG step() now converts CPU cycles to PSG clock internally,
-                    // so no period scaling is needed — just forward raw values.
-                    if (this._opnAddrLatch <= 0x0F) {
-                        this.psg._writeReg(this._opnAddrLatch, this._opnDataBus);
-                    }
+                case 0x01: // READDAT: seldat ← regs[selreg]
+                    this._opnPState = 0x01;
+                    this._opnDataBus = this._opnRegs[this._opnAddrLatch] & 0xFF;
                     break;
-                case 0x01: { // Read: load latched register onto data bus
+                case 0x02: { // WRITEDAT: writereg(selreg, seldat)
+                    this._opnPState = 0x02;
                     const reg = this._opnAddrLatch;
-                    if (reg === 0x0E) {
-                        // Port A input: joystick data (active low)
-                        const portB = this._opnRegs[0x0F];
-                        if (!(portB & 0x40)) this._opnDataBus = this._gamepadState[0];
-                        else                 this._opnDataBus = this._gamepadState[1];
-                    } else {
-                        this._opnDataBus = this._opnRegs[reg];
+                    const dat = this._opnDataBus & 0xFF;
+                    this.opn.writeReg(reg, dat);
+                    this._opnRegs[reg] = dat;
+                    if (reg <= 0x0F) this.psg._writeReg(reg, dat);
+                    break;
+                }
+                case 0x03: { // ADDRESS: selreg ← seldat; prescaler regs self-trigger
+                    this._opnPState = 0x03;
+                    this._opnAddrLatch = this._opnDataBus & 0xFF;
+                    const r = this._opnAddrLatch;
+                    if (r >= 0x2D && r <= 0x2F) {
+                        this._opnDataBus = 0;
+                        this.opn.writeReg(r, 0);
+                        this._opnRegs[r] = 0;
                     }
                     break;
                 }
-                // 0x00 = Inactive — do nothing
+                case 0x04: // READSTAT
+                    this._opnPState = 0x04;
+                    break;
+                case 0x09: // JOYSTICK
+                    this._opnPState = 0x09;
+                    break;
+                // other codes: ignored (pstate unchanged)
             }
             return;
         }
@@ -1037,13 +1093,23 @@ export class FM7 {
         // $FDFD-$FDFF: Boot mode / extended registers (stub)
         if (addr >= 0xFDFD) return;
 
+        // PTM (MC6840) $FDE0-$FDE7
+        if (addr >= 0xFDE0 && addr <= 0xFDE7) {
+            this._ptmWrite(addr - 0xFDE0, val);
+            return;
+        }
+
         // FM77AV: MMR registers ($FD80-$FD9F)
         if (this.isFM77AV && addr >= 0xFD80 && addr <= 0xFD9F) {
             // $FD93: MMR/TWR control register
             // bit 7: MMR enable, bit 6: TWR enable
             if (addr === FD93_MMR_CTRL) {
+                const prevTwr = this._twrFlag;
                 this._mmrEnabled = (val & 0x80) !== 0;
                 this._twrFlag = (val & 0x40) !== 0;
+                if (this._twrFlag && !prevTwr) {
+                    console.log(`[TWR] ENABLED by $FD93=$${val.toString(16)} at PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()} twrReg=$${this._twrReg.toString(16)}`);
+                }
                 return;
             }
             // $FD90: MMR bank select register (selects which bank for $FD80-$FD8F AND address translation)
@@ -1073,6 +1139,31 @@ export class FM7 {
                 this._ioWarnSeen.add(key);
                 console.warn(`[IO WRITE] Unhandled $${addr.toString(16).toUpperCase()} = $${val.toString(16).toUpperCase()} at MainPC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
             }
+        }
+    }
+
+    // =========================================================================
+    // TWR (Text Window RAM) Address Translation
+    // physAddr = (twr_reg * 256 + addr) & 0xFFFF
+    // FM77AV: wbr_reg=0, result is always in $0xxxx (extended RAM bank 0)
+    // =========================================================================
+
+    _twrTranslate(addr) {
+        return ((this._twrReg << 8) + addr) & 0xFFFF;
+    }
+
+    _twrRead(addr) {
+        const physAddr = this._twrTranslate(addr);
+        if (physAddr < MMR_EXTENDED_RAM) {
+            return this._extRAM[physAddr];
+        }
+        return 0xFF;
+    }
+
+    _twrWrite(addr, val) {
+        const physAddr = this._twrTranslate(addr);
+        if (physAddr < MMR_EXTENDED_RAM) {
+            this._extRAM[physAddr] = val;
         }
     }
 
@@ -1292,6 +1383,7 @@ export class FM7 {
             if (result && result.sideEffect === 'busyOn') {
                 // $D40A write: Set BUSY
                 this._subBusy = true;
+                this._subBusyWasCleared = false;
             }
             return;
         }
@@ -1438,6 +1530,9 @@ export class FM7 {
                 if (this._fmCardEnabled) this.opn.step(mainElapsed);
                 this.cmt.step(mainElapsed);
 
+                // PTM timer tick (FM77AV only)
+                if (this.isFM77AV) this._ptmTick(mainElapsed);
+
                 // Check and assert IRQ/FIRQ on main CPU (level-triggered)
                 this._checkAndAssertInterrupts();
 
@@ -1500,6 +1595,126 @@ export class FM7 {
         });
     }
 
+    // =========================================================================
+    // PTM (MC6840 Programmable Timer Module)
+    // =========================================================================
+
+    _ptmUpdateStatusTop() {
+        // Bit 7 of status = any enabled timer has pending IRQ
+        let any = false;
+        for (let i = 0; i < 3; i++) {
+            if ((this._ptmStatus & (1 << i)) && (this._ptmCR[i] & 0x40)) { any = true; break; }
+        }
+        if (any) this._ptmStatus |= 0x80;
+        else this._ptmStatus &= ~0x80;
+    }
+
+    _ptmReload(idx) {
+        this._ptmCounter[idx] = this._ptmLatch[idx];
+    }
+
+    _ptmRead(r) {
+        // r = 0..7 (addr - 0xFDE0)
+        if (r === 0) return 0xFF; // no-op read
+        if (r === 1) {
+            // Status register read; status is cleared by reading status *and then* the counter
+            // of the pending timer (MC6840 datasheet). For simplicity, clear status on read when
+            // all pending timers have also had their status-read bit set. We use a simpler model:
+            // reading status does NOT clear; reading the timer's MSB clears that timer's flag.
+            const s = this._ptmStatus;
+            return s;
+        }
+        // r = 2,4,6: timer MSB read (captures LSB into buffer, clears IRQ flag)
+        if ((r & 1) === 0) {
+            const t = (r >> 1) - 1; // 2→0, 4→1, 6→2
+            const cnt = this._ptmCounter[t];
+            this._ptmLsbBuf[t] = cnt & 0xFF;
+            // Clear timer's IRQ flag on counter read
+            this._ptmStatus &= ~(1 << t);
+            this._ptmUpdateStatusTop();
+            return (cnt >> 8) & 0xFF;
+        }
+        // r = 3,5,7: buffered LSB read
+        const t = ((r - 1) >> 1) - 1;
+        return this._ptmLsbBuf[t];
+    }
+
+    _ptmWrite(r, val) {
+        val &= 0xFF;
+        if (r === 0) {
+            // CR1 if CR2[0]=1, else CR3
+            if (this._ptmCR[1] & 0x01) {
+                const prev = this._ptmCR[0];
+                this._ptmCR[0] = val;
+                // CR1[0] MR bit (CR1 bit 0 per some docs — actually CR1[7] "master reset" when in CR1 mode is non-standard)
+                // MC6840: internal reset is via CR1 bit 0? No — in MC6840, bit 0 of CR1 = clock source.
+                // Master reset is asserted when CR2[0]=0 style reset; but simpler: many references state
+                // CR1 bit 0 is "internal clock" not reset. The "reset" mechanism: writes to CR with address
+                // 0 when CR2[0]=1 resets timer 1? No. We follow the common approximation: when CR1 is
+                // written and a timer is in a state needing reload, reload happens via explicit LSB write.
+                // For this impl, just store CR1. If CR[7] of CR1 = 1 we treat as master reset.
+                if ((val & 0x01) && !(prev & 0x01)) {
+                    // Transition out of internal clock disabled: nothing special here.
+                }
+            } else {
+                this._ptmCR[2] = val;
+            }
+            return;
+        }
+        if (r === 1) {
+            this._ptmCR[1] = val;
+            return;
+        }
+        // r = 2,4,6: write MSB buffer (shared)
+        if ((r & 1) === 0) {
+            this._ptmMsbWBuf = val;
+            return;
+        }
+        // r = 3,5,7: write LSB, commit latch, reload counter for that timer
+        const t = ((r - 1) >> 1) - 1;
+        this._ptmLatch[t] = ((this._ptmMsbWBuf & 0xFF) << 8) | val;
+        this._ptmReload(t);
+        // Clear pending IRQ flag on reload
+        this._ptmStatus &= ~(1 << t);
+        this._ptmUpdateStatusTop();
+    }
+
+    /**
+     * Tick the PTM by `mainCycles` main CPU cycles.
+     * PTM internal clock ≈ 1MHz (main CPU / 2). Counters decrement each PTM tick.
+     * Underflow: counter wraps to reload latch value and sets IRQ flag (mode: continuous).
+     */
+    _ptmTick(mainCycles) {
+        // Accumulate at PTM clock rate (main/2). We scale by 2 to avoid fractions.
+        this._ptmCycleAcc += mainCycles;
+        const ticks = this._ptmCycleAcc >> 1;
+        this._ptmCycleAcc &= 1;
+        if (ticks <= 0) return;
+        for (let i = 0; i < 3; i++) {
+            // Timer enabled when CR[0] = 1 (internal clock source)
+            // NOTE: CR bit layout (MC6840): [0] clock src, [1] 16/8-bit, [2..4] mode, [5] prescale(T3), [6] IRQ en, [7] out en
+            const cr = this._ptmCR[i];
+            if (!(cr & 0x01)) continue; // external clock — ignore
+            // T3 prescale divide-by-8 when CR3[0]=1 (CR[1] in the [1] position? datasheet: CR3 bit 0 controls /8 prescaler)
+            let n = ticks;
+            if (i === 2 && (this._ptmCR[2] & 0x01)) {
+                // Use a second accumulator for /8 divider
+                this._ptmT3Div = (this._ptmT3Div || 0) + ticks;
+                n = this._ptmT3Div >> 3;
+                this._ptmT3Div &= 7;
+                if (n <= 0) continue;
+            }
+            let c = this._ptmCounter[i] - n;
+            while (c < 0) {
+                c += (this._ptmLatch[i] + 1);
+                // Underflow: set IRQ flag
+                this._ptmStatus |= (1 << i);
+            }
+            this._ptmCounter[i] = c & 0xFFFF;
+        }
+        this._ptmUpdateStatusTop();
+    }
+
     /** Check all IRQ/FIRQ sources and assert on CPUs */
     _checkAndAssertInterrupts() {
         // Main CPU IRQ: timer, keyboard, FDC, OPN timers
@@ -1536,6 +1751,9 @@ export class FM7 {
             if (this._opnIrqLatch) mainIrq = true;
         }
 
+        // PTM IRQ (FM77AV $FDE0-$FDE7, routed via $FD17 bit 2)
+        if (this.isFM77AV && (this._ptmStatus & 0x80)) mainIrq = true;
+
         // Level-triggered: assert or de-assert IRQ based on current sources
         if (mainIrq) this.mainCPU.irq();
         else this.mainCPU.intr &= ~0x04;  // INTR_IRQ
@@ -1545,7 +1763,10 @@ export class FM7 {
         //   bit 0 = 0 → keyboard._irqMask = 1 → keyboard routed to sub CPU via FIRQ
         //   bit 0 = 1 → keyboard._irqMask = 0 → keyboard routed to main CPU via IRQ
         // When keyboard is routed to main CPU, sub CPU FIRQ must be cleared.
-        if (this.keyboard._keyAvailable && this.keyboard._irqMask !== 0) {
+        // Use _irqFlag (edge, cleared on $FD01 read) rather than
+        // _keyAvailable (level, stays latched on the data register)
+        // so sub FIRQ tracks new events only.
+        if (this.keyboard._irqFlag && this.keyboard._irqMask !== 0) {
             this.subCPU.intr |= 0x02; // INTR_FIRQ
         } else {
             this.subCPU.intr &= ~0x02;
@@ -1571,6 +1792,7 @@ export class FM7 {
             if (!this._subHalted) {
                 this._subHalted = true;
                 this._subBusy = true;
+                this._subBusyWasCleared = false;
                 this.scheduler.setSubHalted(true);
                 // Save sub CPU's view of $D430 state at halt time.
                 // Main CPU MMR writes to $D430 during halt may otherwise
@@ -1639,6 +1861,11 @@ export class FM7 {
                 e.preventDefault();
                 this._breakKey = true;
                 this.mainRAM[0x0313] = 0xFF;
+                // BREAK press asserts main CPU FIRQ (shared line with
+                // sub→main attention). Level-triggered in hardware, but
+                // edge on press is sufficient: FIRQ handler reads $FD04
+                // bit1 to identify BREAK and acts accordingly.
+                this.mainCPU.firq();
                 return;
             }
             this.keyboard.keyDown(e);
@@ -1877,6 +2104,7 @@ export class FM7 {
         const isAV = type === MACHINE_FM77AV;
         const cpuHz = isAV ? 2000000 : 1794000;
         setCPUClock(cpuHz);
+        FDC.setCPUClock(cpuHz);
         this.opn.setAVMode(isAV);
         this.opn.setCPUClock(cpuHz);
         this.psg.setCPUClock(cpuHz);
@@ -1949,6 +2177,144 @@ export class FM7 {
     }
 
     /**
+     * Enable FDC logging from browser console.
+     * Usage: fm7.fdcLogOn() → operate → fm7.fdcLogDump()
+     */
+    fdcLogOn() {
+        this.fdc.logEnabled = true;
+        this.fdc.log = [];
+        console.log('[FDC] Logging enabled');
+    }
+
+    /**
+     * Dump FDC log (command entries only, no status polls).
+     * Usage: fm7.fdcLogDump()
+     */
+    fdcLogDump() {
+        const cmds = this.fdc.log.filter(e => e.t !== 'R' && e.t !== 'W');
+        console.log(`[FDC] ${cmds.length} command entries (${this.fdc.log.length} total):`);
+        for (const e of cmds) {
+            console.log(JSON.stringify(e));
+        }
+        return cmds;
+    }
+
+    /**
+     * Disable FDC logging.
+     */
+    fdcLogOff() {
+        this.fdc.logEnabled = false;
+        console.log('[FDC] Logging disabled');
+    }
+
+    /** Find and dump BASIC program in memory after LOAD.
+     *  Usage: fm7.findBasic()  — searches RAM for BASIC lines, dumps program area */
+
+    /** Set write watchpoint on RAM range. Usage: fm7.watchOn(0x7CBB, 3) */
+    watchOn(addr, len) { this._watchAddr = addr; this._watchLen = len || 1; console.log(`[WATCH] ON $${addr.toString(16)} len=${len||1}`); }
+    watchOff() { this._watchAddr = 0; this._watchLen = 0; console.log('[WATCH] OFF'); }
+
+    /** Start capturing FDC read bytes. Call before LOAD. */
+    fdcCaptureOn() { this.fdc._captureEnabled = true; this.fdc._captureData = []; console.log('[FDC] capture ON'); }
+    /** Stop capturing. */
+    fdcCaptureOff() { this.fdc._captureEnabled = false; console.log(`[FDC] capture OFF, ${this.fdc._captureData.length} bytes`); }
+    /** Compare FDC captured bytes with main RAM at given address.
+     *  Usage: fm7.fdcCompare(0x7C02)  — after LOAD completes */
+    fdcCompare(ramBase) {
+        const cap = this.fdc._captureData;
+        if (!cap || cap.length === 0) { console.log('No capture data'); return; }
+        console.log(`Comparing ${cap.length} FDC bytes vs RAM at $${ramBase.toString(16)}`);
+        let mismatches = 0;
+        for (let i = 0; i < cap.length && i < 0x2000; i++) {
+            const ram = this._mainRead(ramBase + i);
+            if (cap[i] !== ram) {
+                if (mismatches < 40) {
+                    console.log(`  DIFF @${i} ($${(ramBase+i).toString(16)}): FDC=0x${cap[i].toString(16).padStart(2,'0')} RAM=0x${ram.toString(16).padStart(2,'0')}`);
+                }
+                mismatches++;
+            }
+        }
+        console.log(`Total: ${cap.length} bytes, ${mismatches} mismatches`);
+        // Also dump first 512 bytes of capture as hex
+        console.log('FDC capture first 288 bytes:');
+        for (let i = 0; i < Math.min(288, cap.length); i += 16) {
+            const hex = cap.slice(i, i+16).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+            const ascii = cap.slice(i, i+16).map(b=>(b>=0x20&&b<0x7f)?String.fromCharCode(b):'.').join('');
+            console.log(`  ${i.toString(16).padStart(4,'0')}: ${hex}  ${ascii}`);
+        }
+    }
+
+    findBasic() {
+        // Search for line 1000 pattern: [nextPtr:2][03 E8][3A 8D 2A]
+        let found = -1;
+        for (let addr = 0x100; addr < 0x8000; addr++) {
+            if (this._mainRead(addr) === 0x03 && this._mainRead(addr+1) === 0xE8 &&
+                this._mainRead(addr+2) === 0x3A && this._mainRead(addr+3) === 0x8D) {
+                found = addr - 2; // nextPtr is 2 bytes before lineNum
+                break;
+            }
+        }
+        if (found < 0) {
+            console.log('[BASIC] Line 1000 not found in RAM');
+            return;
+        }
+        console.log(`[BASIC] Line 1000 found at $${found.toString(16).padStart(4,'0')}`);
+
+        // Sequential scan (how LIST works — scan for 0x00 line terminators)
+        console.log('[BASIC] === Sequential scan ===');
+        let ptr = found;
+        let lineCount = 0;
+        while (ptr < 0x8000 && lineCount < 200) {
+            const hi = this._mainRead(ptr);
+            const lo = this._mainRead(ptr + 1);
+            const nextPtr = (hi << 8) | lo;
+            const lineNum = (this._mainRead(ptr+2) << 8) | this._mainRead(ptr+3);
+            if (nextPtr === 0x0000) {
+                console.log(`[BASIC] End marker at $${ptr.toString(16)} after ${lineCount} lines`);
+                break;
+            }
+            lineCount++;
+            // Show first 5 and last lines
+            if (lineCount <= 5) {
+                console.log(`  Line ${lineNum} at $${ptr.toString(16)} nextPtr=$${nextPtr.toString(16)} offset=${ptr-found}`);
+            }
+            // Scan forward for 0x00 line terminator (sequential, like LIST)
+            let scan = ptr + 4;
+            while (scan < ptr + 300 && this._mainRead(scan) !== 0x00) scan++;
+            const nextLine = scan + 1;
+            if (lineCount <= 5) {
+                console.log(`    terminator at $${scan.toString(16)}, next line at $${nextLine.toString(16)}`);
+            }
+            ptr = nextLine; // move to next line (sequential)
+        }
+
+        // Dump memory around where it stopped
+        console.log(`[BASIC] Dump around break point ($${(ptr-32).toString(16)}):`);
+        this.dumpMem(ptr > 32 ? ptr - 32 : found, 96);
+
+        // Also dump the first 288 bytes (more than 1 sector) of program area
+        console.log('[BASIC] First 288 bytes of program:');
+        this.dumpMem(found, 288);
+    }
+
+    /** Dump main RAM as hex. Usage: fm7.dumpMem(0x0600, 256) */
+    dumpMem(addr, len = 256) {
+        const lines = [];
+        for (let i = 0; i < len; i += 16) {
+            const a = (addr + i) & 0xFFFF;
+            const hex = [];
+            const ascii = [];
+            for (let j = 0; j < 16 && (i + j) < len; j++) {
+                const b = this._mainRead((a + j) & 0xFFFF);
+                hex.push(b.toString(16).padStart(2, '0'));
+                ascii.push(b >= 0x20 && b < 0x7F ? String.fromCharCode(b) : '.');
+            }
+            lines.push(`$${a.toString(16).padStart(4, '0')}: ${hex.join(' ')}  ${ascii.join('')}`);
+        }
+        console.log(lines.join('\n'));
+    }
+
+    /**
      * Enable sub CPU execution trace for N instructions.
      * Usage: fm7.traceSubOn(500) then trigger scroll
      */
@@ -1992,13 +2358,25 @@ export class FM7 {
         this._breakKey    = false;
         this._timerIRQ    = false;
         this._irqMaskReg  = 0;
-        // BASIC ROM: enabled on BASIC boot, disabled on DOS boot
-        this._basicRomEnabled = (bootMode === 'basic');
+
+        // Reset PTM state
+        this._ptmCR.fill(0);
+        this._ptmLatch.fill(0xFFFF);
+        this._ptmCounter.fill(0xFFFF);
+        this._ptmLsbBuf.fill(0);
+        this._ptmMsbWBuf = 0;
+        this._ptmStatus = 0;
+        this._ptmCycleAcc = 0;
+        this._ptmT3Div = 0;
+        // BASIC ROM: always enabled at reset (real hardware default).
+        // IPL/game code disables it via write to $FD0F when needed.
+        this._basicRomEnabled = true;
         this._fbasicWarnShown = false;
 
         // Reset OPN state
         this._opnAddrLatch = 0;
         this._opnDataBus = 0;
+        this._opnPState = 0;
         this._opnRegs.fill(0);
         this._gamepadState[0] = 0xFF;
         this._gamepadState[1] = 0xFF;
@@ -2011,10 +2389,10 @@ export class FM7 {
                 this._patchInitiatorToAV();
             }
             this._initiatorActive = false; // Initiator ROM bypassed — start disabled
-            // Sub monitor type matches real hardware after Initiator:
-            //   DOS: Type-A (Initiator starts Type-A, doesn't switch for DOS)
-            //   BASIC: Type-C (Initiator switches to Type-C for F-BASIC)
-            this._subMonitorType = (bootMode === 'dos') ? SUB_MONITOR_A : SUB_MONITOR_C;
+            this._initiatorHandoffDone = false;
+            // Sub monitor type after reset is always Type-C (subrom_bank=0).
+            // The IPL/game then switches via $FD13 if it needs Type-A/B.
+            this._subMonitorType = SUB_MONITOR_C;
             this._cgRomBank = 0;
             this._nmiMaskSub = false;
             this._subResetFlag = false;
@@ -2051,8 +2429,22 @@ export class FM7 {
             this._keyEncFormatExplicit = false;
         } else {
             this._initiatorActive = false;
+            this._initiatorHandoffDone = false;
             this._subMonitorType = SUB_MONITOR_C;
             this._cgRomBank = 0;
+            // Clear FM77AV state that may linger from a previous AV session
+            this._nmiMaskSub = false;
+            this._subResetFlag = false;
+            this._vsyncFlag = true;
+            this._blankFlag = true;
+            this._vblankCycles = 0;
+            this._analogPaletteAddr = 0;
+            this._analogPalette.fill(0);
+            this._mmrEnabled = false;
+            this._mmrBankReg = 0;
+            this._twrFlag = false;
+            this._twrReg = 0;
+            this._mmrRegs.fill(0);
             this.display.analogPalette = null;
             this.display.isAV = false;
             // FM-7: ASCII character codes, no break codes
@@ -2333,12 +2725,28 @@ export class FM7 {
             this._installBootROMtoRAM();
         }
 
-        // Some IPLs (e.g. BUG05/Ys) use absolute addresses assuming the
-        // code starts at $0000, but boot_dos.rom loads sectors to $0300.
-        // Detect this by checking if the IPL references addresses below
-        // $0300 (LDX #$00xx, JSR $00xx-$02xx, etc.) and pre-copy the
-        // boot sectors to $0000 so these references resolve correctly.
-        this._preloadBootSectorsToZero(disk);
+        // Some IPLs use absolute addresses designed for $0100 base
+        // (sector 1→$0100, sector 2→$0200, ...) but boot_dos.rom loads
+        // sector 1→$0300, sector 2→$0400 and JMPs to $0300.
+        // Running from $0300 causes self-overwrite when BIOS reads sectors
+        // back to $0200+. Detect these IPLs and pre-load at $0100 base,
+        // running from $0100 instead of boot_dos.rom.
+        if (this._needsIPLPreload(disk)) {
+            // Pre-load T0/S0 sectors 1-16 to $0100-$10FF
+            for (let sec = 1; sec <= 16; sec++) {
+                const s = disk.getSector(0, 0, sec);
+                if (!s || !s.data) break;
+                const base = sec * 0x100;
+                for (let i = 0; i < s.data.length; i++) {
+                    this.mainRAM[(base + i) & 0xFFFF] = s.data[i];
+                }
+            }
+            // Install boot_dos.rom to RAM for FDC callbacks ($FE02/$FE08)
+            this._installBootROMtoRAM();
+            this._initFDCPorts();
+            console.log('[BOOT] IPL uses $0100-based addresses: pre-loaded, entry $0100');
+            return 0x0100;
+        }
 
         // BOOT_DOS.ROM will handle everything:
         //   1. Set DP=$FD, SP=$FC7F
@@ -2351,44 +2759,32 @@ export class FM7 {
     }
 
     /**
-     * Pre-load boot sectors to $0000 for IPLs that use absolute $0000-based addresses.
-     * boot_dos.rom loads sector 1→$0300, sector 2→$0400. Some IPLs reference
-     * code/data at $0000-$02FF (designed for $0000 base). This copies the first
-     * 16 sectors (T0/S0) to $0000-$0FFF so these references work.
+     * Detect if boot sector IPL references addresses below $0300.
+     * Such IPLs are designed for $0100 base (sector 1→$0100, etc.)
+     * and cannot run correctly from boot_dos.rom's $0300 load address.
+     * @returns {boolean} true if IPL needs $0100-base pre-loading
      */
-    _preloadBootSectorsToZero(disk) {
+    _needsIPLPreload(disk) {
         const sector1 = disk.getSector(0, 0, 1);
-        if (!sector1 || !sector1.data) return;
-        const s1data = sector1.data;
+        if (!sector1 || !sector1.data) return false;
+        const d = sector1.data;
 
-        // Check if sector 1 IPL references addresses below $0300
+        // Check if sector 1 IPL references addresses in $0020-$02FF.
+        // These are absolute references that only work when sectors are
+        // loaded at $0100 base (sector 1 at $0100, sector 2 at $0200).
         // Look for extended addressing: BD xx xx (JSR), 7E xx xx (JMP),
-        // 8E xx xx (LDX#), FE xx xx (LDU), BE xx xx (LDX)
-        let needsCopy = false;
-        for (let i = 0; i < Math.min(s1data.length, 64); i++) {
-            const b = s1data[i];
-            if ((b === 0xBD || b === 0x7E || b === 0x8E || b === 0xBE || b === 0xFE)
-                && i + 2 < s1data.length) {
-                const addr = (s1data[i + 1] << 8) | s1data[i + 2];
+        // 8E xx xx (LDX#), FE xx xx (LDU), BE xx xx (LDX), CC xx xx (LDD#)
+        for (let i = 0; i < Math.min(d.length, 64); i++) {
+            const b = d[i];
+            if ((b === 0xBD || b === 0x7E || b === 0x8E || b === 0xBE ||
+                 b === 0xFE || b === 0xCC) && i + 2 < d.length) {
+                const addr = (d[i + 1] << 8) | d[i + 2];
                 if (addr >= 0x0020 && addr < 0x0300) {
-                    needsCopy = true;
-                    break;
+                    return true;
                 }
             }
         }
-
-        if (needsCopy) {
-            // Copy T0/S0 sectors 1-16 to $0000-$0FFF
-            for (let sec = 1; sec <= 16; sec++) {
-                const secObj = disk.getSector(0, 0, sec);
-                if (!secObj || !secObj.data) break;
-                const base = (sec - 1) * secObj.data.length;
-                for (let i = 0; i < secObj.data.length; i++) {
-                    this.mainRAM[base + i] = secObj.data[i];
-                }
-            }
-            console.log('[BOOT] IPL uses $0000-based addresses: pre-copied T0/S0 to $0000');
-        }
+        return false;
     }
 
     /**
@@ -2474,25 +2870,40 @@ export class FM7 {
         // Stop any active BEEP sound
         this._beepStop();
 
+        // Final UI update
+        if (this._frameCallback) this._frameCallback();
+
         console.log('FM-7 emulation stopped');
     }
 
     /**
      * Execute a single emulation frame.
-     * Called by requestAnimationFrame at ~60fps.
+     * Called by requestAnimationFrame. Frame-limited to ~60fps
+     * so high-refresh displays (120/360Hz) don't speed up emulation.
      */
     _frame() {
         if (!this._running) return;
 
+        // Wall-clock based pacing: advance emulation by actual elapsed time
+        // so that low-refresh-rate rAF environments (30 Hz) still run at real-time speed.
+        const now = performance.now();
+        const elapsed = now - this._lastFrameTime;
+        if (elapsed < 15.5) {
+            this._animFrameId = requestAnimationFrame(this._boundFrame);
+            return;
+        }
+        // Clamp to avoid huge catch-up after tab suspension or pauses.
+        const simMs = Math.min(elapsed, 50);
+        this._lastFrameTime = now;
+
         // Poll gamepads for joystick input
         this._pollGamepads();
 
-        // Run scheduler for one browser frame (~16667μs = 60 Hz).
-        // Internal VSync event fires at 66.1 Hz (15120μs) independently.
+        // Run scheduler for the actual wall-clock interval just elapsed.
         // CMT turbo: run 50x faster only when actively reading a tape
         const cmtTurbo = (this.cmt.motor && this.cmt.loaded) ? 50 : 1;
         try {
-            this.scheduler.exec(16667 * cmtTurbo);
+            this.scheduler.exec(Math.round(simMs * 1000) * cmtTurbo);
         } catch (e) {
             console.error('Emulation error:', e);
             this.stop();
@@ -2504,14 +2915,16 @@ export class FM7 {
             this.display.render(this._canvas);
         }
 
-        // FPS calculation
+        // FPS calculation (reuse 'now' from frame limiter above)
         this._fpsCounter++;
-        const now = performance.now();
         if (now - this._fpsTime >= 1000) {
             this._currentFPS = this._fpsCounter;
             this._fpsCounter = 0;
             this._fpsTime = now;
         }
+
+        // Per-frame callback (UI status update etc.)
+        if (this._frameCallback) this._frameCallback();
 
         // Schedule next frame
         this._animFrameId = requestAnimationFrame(this._boundFrame);
@@ -2876,6 +3289,201 @@ export class FM7 {
             setTimeout(() => { try { g.disconnect(); } catch (e) {} }, 10);
         }
         this._beepContinuous = false;
+    }
+
+    // =========================================================================
+    // Debug: BASIC program area dump (bypasses ROM overlay)
+    // =========================================================================
+
+    /**
+     * Dump the BASIC program lines from RAM (bypasses ROM overlay).
+     * Call from browser console: fm7.dumpBasicProgram()
+     */
+    dumpBasicProgram() {
+        // Use _mainRead() to go through MMR mapping (F-BASIC 3.3 uses MMR)
+        const rd = (a) => this._mainRead(a);
+        const txttab = (rd(0x19) << 8) | rd(0x1A);
+        const vartab = (rd(0x1B) << 8) | rd(0x1C);
+        console.log(`TXTTAB=$${txttab.toString(16)}, VARTAB=$${vartab.toString(16)}, ROM=${this._basicRomEnabled?'ON':'OFF'}, MMR=${this._mmrEnabled?'ON':'OFF'}`);
+        if (this._mmrEnabled) {
+            const seg0 = this._mmrReg[this._mmrSegment * 16];
+            console.log(`MMR seg=${this._mmrSegment} bank0=page$${seg0.toString(16)}`);
+        }
+        console.log(`Trampoline $0260: ${[rd(0x260),rd(0x261),rd(0x262)].map(b=>b.toString(16).padStart(2,'0')).join(' ')}`);
+
+        let addr = txttab;
+        let lineCount = 0;
+        const maxLines = 200;
+        while (addr > 0 && addr < 0xFFFF && lineCount < maxLines) {
+            const nextHi = rd(addr), nextLo = rd(addr + 1);
+            const next = (nextHi << 8) | nextLo;
+            if (next === 0) { console.log(`  $${addr.toString(16)}: END (00 00)`); break; }
+            const lineNum = (rd(addr + 2) << 8) | rd(addr + 3);
+            const lineLen = next - addr;
+            const crossesROM = addr < 0x8000 && next >= 0x8000;
+            const inROM = addr >= 0x8000 && addr < 0xFC00;
+            let flag = '';
+            if (crossesROM) flag = ' ** CROSSES $8000 **';
+            if (inROM) flag = ' [ROM AREA]';
+            console.log(`  $${addr.toString(16)}: line ${lineNum}, next=$${next.toString(16)}, len=${lineLen}${flag}`);
+            lineCount++;
+            addr = next;
+        }
+        console.log(`Total: ${lineCount} lines`);
+    }
+
+    /**
+     * Enable FDC + ROM toggle tracing.
+     * Call before LOAD: fm7.enableLoadTrace()
+     * After LOAD: fm7.showLoadTrace()
+     */
+    enableLoadTrace() {
+        this._loadTrace = [];
+        this._loadTraceEnabled = true;
+        this._loadTraceRomState = this._basicRomEnabled;
+
+        // Enable FDC built-in log
+        this.fdc.logEnabled = true;
+        this.fdc.log = [];
+        this.fdc._logCycle = 0;
+
+        // Patch FDC readIO to trace $FD1B reads and $FD18 status reads
+        if (!this._origFdcReadIO) {
+            this._origFdcReadIO = this.fdc.readIO.bind(this.fdc);
+        }
+        const origReadIO = this._origFdcReadIO;
+        const self = this;
+        this.fdc.readIO = function(addr) {
+            const val = origReadIO(addr);
+            if (self._loadTraceEnabled) {
+                if (addr === 0xFD1B) {
+                    self._loadTrace.push({ t: 'FDC_R', pc: self.mainCPU.pc, val });
+                } else if (addr === 0xFD1F) {
+                    const drq = val & 0x80 ? 1 : 0;
+                    const irq = val & 0x40 ? 1 : 0;
+                    if (drq || irq) {
+                        self._loadTrace.push({ t: 'DRQ', pc: self.mainCPU.pc, drq, irq });
+                    }
+                } else if (addr === 0xFD18) {
+                    self._loadTrace.push({ t: 'STA', pc: self.mainCPU.pc, val });
+                }
+            }
+            return val;
+        };
+
+        // Also patch FDC writeIO to capture commands
+        if (!this._origFdcWriteIO) {
+            this._origFdcWriteIO = this.fdc.writeIO.bind(this.fdc);
+        }
+        const origWriteIO = this._origFdcWriteIO;
+        this.fdc.writeIO = function(addr, val) {
+            if (self._loadTraceEnabled) {
+                if (addr === 0xFD18) {
+                    self._loadTrace.push({ t: 'CMD', pc: self.mainCPU.pc, val,
+                        desc: self._fdcCmdName(val) });
+                } else if (addr === 0xFD1A) {
+                    self._loadTrace.push({ t: 'SEC', pc: self.mainCPU.pc, val });
+                } else if (addr === 0xFD19) {
+                    self._loadTrace.push({ t: 'TRK', pc: self.mainCPU.pc, val });
+                } else if (addr === 0xFD1B) {
+                    self._loadTrace.push({ t: 'DAT', pc: self.mainCPU.pc, val });
+                }
+            }
+            return origWriteIO(addr, val);
+        };
+
+        console.log('Load trace enabled. Type LOAD"README" then call fm7.showLoadTrace()');
+    }
+
+    _fdcCmdName(cmd) {
+        const hi = cmd & 0xF0;
+        if (hi === 0x00) return 'RESTORE';
+        if (hi === 0x10) return 'SEEK';
+        if (hi <= 0x30) return 'STEP';
+        if (hi <= 0x50) return 'STEP-IN';
+        if (hi <= 0x70) return 'STEP-OUT';
+        if (hi === 0x80 || hi === 0x90) return `READ_SEC${cmd & 0x10 ? '(M)' : ''}`;
+        if (hi === 0xA0 || hi === 0xB0) return `WRITE_SEC${cmd & 0x10 ? '(M)' : ''}`;
+        if (hi === 0xC0) return 'READ_ADDR';
+        if (hi === 0xD0) return 'FORCE_INT';
+        if (hi === 0xE0) return 'READ_TRK';
+        if (hi === 0xF0) return 'WRITE_TRK';
+        return '???';
+    }
+
+    showLoadTrace() {
+        this._loadTraceEnabled = false;
+        this.fdc.logEnabled = false;
+        const trace = this._loadTrace || [];
+        const fdcLog = this.fdc.log || [];
+
+        // Summary
+        const fdcReads = trace.filter(e => e.t === 'FDC_R');
+        const cmds = trace.filter(e => e.t === 'CMD');
+        const romOn = trace.filter(e => e.t === 'ROM_ON');
+        const romOff = trace.filter(e => e.t === 'ROM_OFF');
+        console.log(`=== LOAD Trace Summary ===`);
+        console.log(`FDC data reads ($FD1B): ${fdcReads.length}`);
+        console.log(`FDC commands: ${cmds.length}`);
+        console.log(`ROM ON events: ${romOn.length}, ROM OFF events: ${romOff.length}`);
+
+        // Show FDC commands with context
+        console.log(`\n=== FDC Commands ===`);
+        for (const e of cmds) {
+            console.log(`  PC=$${e.pc.toString(16)}: ${e.desc} ($${e.val.toString(16).padStart(2,'0')})`);
+        }
+
+        // Show FDC built-in log (CMD/DONE entries only for conciseness)
+        console.log(`\n=== FDC Log (CMD/DONE/SEC_END) ===`);
+        for (const e of fdcLog) {
+            if (e.t === 'CMD') {
+                console.log(`  [${e.cyc}] ${e.cmd} trk=${e.trk} sec=${e.sec} drv=${e.drv} side=${e.side} pos=${e.pos}`);
+            } else if (e.t === 'DONE') {
+                console.log(`  [${e.cyc}] DONE ${e.cmd} status=${e.status} ${e.flags} bytes=${e.bytes}${e.lostBytes ? ' LOST=' + e.lostBytes : ''}`);
+            } else if (e.t === 'SEC_END') {
+                console.log(`  [${e.cyc}] SEC_END bytes=${e.readBytes} next=${e.nextSec}${e.lostBytes ? ' LOST=' + e.lostBytes : ''}`);
+            } else if (e.t === 'FIND_RNF') {
+                console.log(`  [${e.cyc}] RNF! physTrk=${e.physTrk} side=${e.side} sec=${e.sec}`);
+            }
+        }
+
+        // Show ROM toggle events
+        console.log(`\n=== ROM Toggle Events (first 20) ===`);
+        const romEvents = trace.filter(e => e.t === 'ROM_ON' || e.t === 'ROM_OFF');
+        for (const e of romEvents.slice(0, 20)) {
+            console.log(`  PC=$${e.pc.toString(16)}: ${e.t}`);
+        }
+        if (romEvents.length > 20) console.log(`  ... (${romEvents.length - 20} more)`);
+
+        // Show first data bytes read
+        console.log(`\n=== First 32 data bytes ===`);
+        const bytes = fdcReads.slice(0, 32).map(e => e.val.toString(16).padStart(2, '0'));
+        console.log(`  ${bytes.join(' ')}`);
+        const ascii = fdcReads.slice(0, 32).map(e =>
+            e.val >= 0x20 && e.val < 0x7F ? String.fromCharCode(e.val) : '.'
+        ).join('');
+        console.log(`  "${ascii}"`);
+
+        // Show status reads with error bits
+        const staReads = trace.filter(e => e.t === 'STA');
+        if (staReads.length > 0) {
+            console.log(`\n=== Status Register Reads ($FD18) ===`);
+            for (const e of staReads.slice(0, 20)) {
+                const flags = [];
+                if (e.val & 0x80) flags.push('NOT_READY');
+                if (e.val & 0x10) flags.push('RNF');
+                if (e.val & 0x08) flags.push('CRC');
+                if (e.val & 0x04) flags.push('LOST');
+                if (e.val & 0x02) flags.push('DRQ');
+                if (e.val & 0x01) flags.push('BUSY');
+                if (e.val & 0x20) flags.push('RECORD_TYPE');
+                console.log(`  PC=$${e.pc.toString(16)}: $${e.val.toString(16).padStart(2,'0')} ${flags.join('|') || 'OK'}`);
+            }
+        }
+
+        // BASIC program state
+        console.log(`\n=== Post-LOAD BASIC program ===`);
+        this.dumpBasicProgram();
     }
 
     /**

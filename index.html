@@ -12,7 +12,7 @@
 <h1 class="site-title" id="siteTitle">WebM7 — FM-7 Web Emulator</h1>
 
 <div class="main-layout">
-
+<hr size=1>
     <!-- Left: Screen + Toolbar -->
     <div class="left-col">
         <div class="screen-container" id="screenContainer">
@@ -26,7 +26,6 @@
                 <span class="vol-label" id="volLabel">50%</span>
             </div>
             <div class="toolbar-group">
-                <span class="vol-label" id="fpsLabel">--</span>
                 <div class="kbd-leds" style="display:flex;align-items:center;gap:6px;margin:0 6px;">
                     <div style="display:flex;align-items:center;gap:2px;">
                         <span class="kbd-led" id="kbdLedCaps"></span>
@@ -42,9 +41,19 @@
                     </div>
                 </div>
                 <span class="vol-label" id="tbKeyLabel">--</span>
-                <button id="debugPanelBtn" title="Debug Panel">DEBUG</button>
-                <button id="inputPanelBtn" title="Input Monitor">INPUT</button>
+                <span class="vol-label" id="dispModeLabel">--</span>
+                <span class="vol-label" id="fpsLabel">--</span>
                 <button id="fullscreenBtn" title="Fullscreen (F11)">FULL</button>
+            </div>
+        </div>
+        <div class="toolbar toolbar-debug">
+            <div class="toolbar-group">
+                <span class="vol-label toolbar-debug-label">Debug Panels</span>
+                <button id="debugPanelBtn" title="CPU / State">CPU</button>
+                <button id="keyPanelBtn" title="Keyboard">Keyboard</button>
+                <button id="palPanelBtn" title="Palette">Palette</button>
+                <button id="sndPanelBtn" title="PSG / FM">Sound</button>
+                <button id="inputPanelBtn" title="Input Monitor">Input</button>
             </div>
         </div>
     </div>
@@ -181,12 +190,14 @@
                 <button id="diskEjectBtn0" style="font-size:10px;padding:1px 6px;">Eject</button>
             </div>
             <div class="file-name-row" id="diskStatus0">--</div>
+            <select id="diskSelect0" style="display:none;width:100%;font-size:11px;margin-top:2px;"></select>
             <label>Drive 1 <span class="fdc-led" id="fdcLed1"></span></label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile1" accept=".d77,.D77,.2d,.2D">
                 <button id="diskEjectBtn1" style="font-size:10px;padding:1px 6px;">Eject</button>
             </div>
             <div class="file-name-row" id="diskStatus1">--</div>
+            <select id="diskSelect1" style="display:none;width:100%;font-size:11px;margin-top:2px;"></select>
             <div class="fdc-indicator" style="display:flex;align-items:center;gap:8px;margin-top:4px;">
                 <span style="font-size:11px;color:#888;" id="fdcTrackInfo">--</span>
             </div>
@@ -221,10 +232,10 @@
     </div>
 </div>
 
-<!-- Debug Panel (floating) -->
+<!-- CPU / State Panel -->
 <div class="input-panel" id="debugPanel" style="right:auto;left:16px;">
     <div class="ip-header draggable-header">
-        <span>Debug</span>
+        <span>CPU / State</span>
         <button class="ip-close" id="debugPanelClose">&times;</button>
     </div>
     <div class="ip-body">
@@ -232,7 +243,6 @@
             <div class="ip-label">Status</div>
             <div class="debug-grid">
                 <span class="d-label">State</span><span class="d-val" id="stateVal">Stopped</span>
-                <span class="d-label">FPS</span><span class="d-val" id="fpsVal">--</span>
                 <span class="d-label">Main PC</span><span class="d-val" id="mainPCVal">----</span>
                 <span class="d-label">Sub PC</span><span class="d-val" id="subPCVal">----</span>
                 <span class="d-label">Sub CPU</span><span class="d-val" id="subStateVal">--</span>
@@ -240,10 +250,44 @@
             <div class="debug-grid" id="debugAV" style="display:none;margin-top:4px;">
                 <span class="d-label">Monitor</span><span class="d-val" id="subMonVal">--</span>
                 <span class="d-label">Initiator</span><span class="d-val" id="initVal">--</span>
-                <span class="d-label">VRAM</span><span class="d-val" id="vramPageVal">--</span>
-                <span class="d-label">Mode</span><span class="d-val" id="dispModeVal">--</span>
+                <span class="d-label">Boot RAM (BASIC)</span><span class="d-val" id="bootRamVal">--</span>
+                <span class="d-label">MMR</span><span class="d-val" id="mmrVal">--</span>
+                <span class="d-label">MMR Bank ($FD90)</span><span class="d-val" id="mmrBankVal">--</span>
+                <span class="d-label">TWR</span><span class="d-val" id="twrVal">--</span>
+                <span class="d-label">TWR Offset ($FD92)</span><span class="d-val" id="twrOffsetVal">--</span>
+            </div>
+            <div class="ip-label" id="mmrMapLabel" style="display:none;margin-top:6px;">MMR Map (logical → physical page)</div>
+            <div id="mmrMapGrid" style="display:none;font-family:monospace;font-size:10px;color:#cde;line-height:1.4;"></div>
+            <div class="ip-label" id="physMapLabel" style="display:none;margin-top:6px;">Physical Memory Map</div>
+            <div id="physMapGrid" style="display:none;font-family:monospace;font-size:10px;color:#cde;line-height:1.4;"></div>
+            <div style="margin-top:6px;">
+                <button id="stateDumpBtn" style="font-size:11px;padding:2px 8px;cursor:pointer;width:100%;">📋 State Dump</button>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- State Dump Modal -->
+<div id="stateDumpModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:#1a1f2a;border:1px solid #446;border-radius:6px;padding:12px;width:min(780px,94vw);max-height:90vh;display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:#cde;font-weight:bold;">State Dump</span>
+            <div>
+                <button id="stateDumpCopy" style="font-size:11px;padding:2px 10px;margin-right:6px;cursor:pointer;">Copy</button>
+                <button id="stateDumpClose" style="font-size:11px;padding:2px 10px;cursor:pointer;">Close</button>
+            </div>
+        </div>
+        <textarea id="stateDumpText" style="flex:1;min-height:60vh;background:#0c1018;color:#cde;border:1px solid #334;font-family:monospace;font-size:11px;padding:6px;" readonly></textarea>
+    </div>
+</div>
+
+<!-- Keyboard Panel -->
+<div class="input-panel" id="keyPanel">
+    <div class="ip-header draggable-header">
+        <span>Keyboard</span>
+        <button class="ip-close" id="keyPanelClose">&times;</button>
+    </div>
+    <div class="ip-body">
         <div class="ip-section">
             <div class="ip-label">Keyboard <span id="kbdModeVal" style="float:right;font-size:10px;color:#8899aa;">ASCII</span></div>
             <div class="key-display" id="keyDisplay">--</div>
@@ -256,6 +300,16 @@
                 <button id="breakKeyBtn" style="font-size:0.8em;padding:1px 8px;cursor:pointer;">Change...</button>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- Palette Panel -->
+<div class="input-panel" id="palPanel">
+    <div class="ip-header draggable-header">
+        <span>Palette</span>
+        <button class="ip-close" id="palPanelClose">&times;</button>
+    </div>
+    <div class="ip-body">
         <div class="ip-section">
             <div class="ip-label">Palette</div>
             <div class="palette-row" id="paletteRow"></div>
@@ -264,6 +318,16 @@
             <div class="ip-label">Analog Palette (4096 colors)</div>
             <canvas id="analogPaletteCanvas" width="64" height="64" style="width:128px;height:128px;image-rendering:pixelated;border:1px solid #333;border-radius:3px;"></canvas>
         </div>
+    </div>
+</div>
+
+<!-- PSG / FM Panel -->
+<div class="input-panel" id="sndPanel">
+    <div class="ip-header draggable-header">
+        <span>PSG / FM</span>
+        <button class="ip-close" id="sndPanelClose">&times;</button>
+    </div>
+    <div class="ip-body">
         <div class="ip-section">
             <div class="ip-label">PSG Registers</div>
             <div class="psg-regs" id="psgRegs"></div>
@@ -354,6 +418,8 @@
         <p>FM77AVモードで起動する場合は、上記に加えて以下のROMも必要です。</p>
         <table>
         <tr><th>ファイル名</th><th>内容</th></tr>
+        <tr><td><code>INITIATE.ROM</code></td><td>イニシエータROM（FM77AV起動シーケンスに必要）</td></tr>
+        <tr><td><code>KANJI.ROM</code></td><td>漢字 ROM（JIS第一水準、FM77AVでは必須）</td></tr>
         <tr><td><code>SUBSYSCG.ROM</code></td><td>キャラクタージェネレータ ROM（FM77AV統合版）</td></tr>
         <tr><td><code>SUBSYS_A.ROM</code></td><td>サブシステム Type-A ROM</td></tr>
         <tr><td><code>SUBSYS_B.ROM</code></td><td>サブシステム Type-B ROM</td></tr>
@@ -389,13 +455,22 @@
         <h3>左側 — エミュレータ画面</h3>
         <ul>
         <li><strong>Screen</strong> — FM-7 の映像出力（640×200、スキャンライン付き）。クリックするとキーボード入力がエミュレータに渡ります。</li>
-        <li><strong>Toolbar</strong> — 画面下のバーに以下の機能があります。
+        <li><strong>Toolbar 1行目</strong> — 画面下のバーに以下の機能があります。
             <ul>
             <li><strong>VOL</strong> / スライダー — 音量調整（ミュート切替可）</li>
             <li><strong>FPS</strong> — 現在のフレームレート表示</li>
+            <li><strong>CAP / カナ / INS</strong> — キーボードLED</li>
             <li><strong>FM-7 Key</strong> — エミュレータに渡された最新のキーコード</li>
-            <li><strong>INPUT</strong> — Input Monitor パネルの開閉（後述）</li>
             <li><strong>FULL</strong> / F11キー — フルスクリーン表示の切替</li>
+            </ul>
+        </li>
+        <li><strong>Toolbar 2行目 (Debug Panels)</strong> — 各ボタンで独立したフローティング・デバッグパネルを開閉できます。
+            <ul>
+            <li><strong>CPU</strong> — 動作状態 (State / Main PC / Sub PC / Sub CPU)、FM77AV では Monitor / Initiator / Boot RAM / MMR / TWR / MMR Map / 物理メモリマップ を表示</li>
+            <li><strong>Keyboard</strong> — キー入力表示、FM-7 キーボードレイアウト、BREAK キー変更</li>
+            <li><strong>Palette</strong> — デジタルパレット (8色スウォッチ)、FM77AV ではアナログパレット (4096色) も表示</li>
+            <li><strong>Sound</strong> — PSG レジスタ</li>
+            <li><strong>Input</strong> — Input Monitor パネルの開閉 (後述)</li>
             </ul>
         </li>
         </ul>
@@ -407,7 +482,7 @@
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功。ROM Info で読み込み済みROMのサイズ・ハッシュを確認可能（Copy ボタンでクリップボードにコピー）</td></tr>
         <tr><td><strong>Disk Images</strong></td><td>D77 形式のディスクイメージを Drive 0 / Drive 1 にセット。セット時にファイル名を表示。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
         <tr><td><strong>Tape Image</strong></td><td>T77 形式のテープイメージをセット。REW（巻き戻し）、Eject ボタン。CMT LED付き</td></tr>
-        <tr><td><strong>Debug</strong></td><td>動作状態（State / FPS / Main PC / Sub PC / Sub CPU）、キーボード入力表示・FM-7キーボードレイアウト、BREAK キー変更、パレット、PSG レジスタ</td></tr>
+        <tr><td><strong>Debug Panels</strong></td><td>ツールバー2行目の CPU / Keyboard / Palette / Sound / Input ボタンから独立したフローティングパネルを開閉。動作状態、キーボードレイアウト、パレット (FM77AV ではアナログパレット含む)、PSG レジスタなどをリアルタイム表示</td></tr>
         </table>
 
         <h2>Input Monitor</h2>
@@ -432,7 +507,7 @@
         <ul>
         <li><strong>キー入力方式</strong> — <code>event.code</code>（物理キー位置）ベースでマッピングしています。JIS配列（106/109キー）・US配列（101/104キー）のどちらでも同じ配置で使えます</li>
         <li><strong>Cursor → Numpad</strong> — テンキーのないキーボード向けのオプションです。Control セクションでチェックを入れると、カーソルキー（↑↓←→）がテンキーの 8/2/4/6 として動作します。テンキーを使うゲームに便利です</li>
-        <li><strong>BREAK キー</strong> — デフォルトでは <code>`</code>（バッククォート）キーまたは <code>Pause</code> キーが BREAK キーに割り当てられています。Debug パネルの「BREAK Key」セクションで変更できます</li>
+        <li><strong>BREAK キー</strong> — デフォルトでは <code>`</code>（バッククォート）キーまたは <code>Pause</code> キーが BREAK キーに割り当てられています。Keyboard パネルの「BREAK Key」セクションで変更できます</li>
         <li><strong>CAPS / カナ / INS</strong> — それぞれ CapsLock / 右Alt（またはカナキー） / Insert キーで切り替え。状態はキーボードレイアウト表示のLEDで確認できます</li>
         </ul>
 
@@ -561,6 +636,148 @@ import { FM7, MACHINE_FM7, MACHINE_FM77AV } from './js/fm7.js';
 
 const fm7 = new FM7();
 window.fm7 = fm7; // expose for console debugging
+
+// Debug helpers for runtime inspection (BUG investigation)
+window.fm7Debug = {
+    // Dump sub address space [start,end) as Uint8Array
+    dumpSub(start, end) {
+        const out = new Uint8Array(end - start);
+        for (let a = start; a < end; a++) out[a - start] = fm7._subRead(a);
+        return out;
+    },
+    // Dump main address space [start,end) as Uint8Array
+    dumpMain(start, end) {
+        const out = new Uint8Array(end - start);
+        for (let a = start; a < end; a++) out[a - start] = fm7._mainRead(a);
+        return out;
+    },
+    // Save Uint8Array as binary download
+    save(name, data) {
+        const blob = new Blob([data], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name; a.click();
+        URL.revokeObjectURL(url);
+    },
+    // Hex dump
+    hex(data, base = 0, max = 256) {
+        const lines = [];
+        for (let i = 0; i < Math.min(data.length, max); i += 16) {
+            let s = '$' + (base + i).toString(16).padStart(4,'0') + ': ';
+            for (let j = 0; j < 16 && i+j < data.length; j++) s += data[i+j].toString(16).padStart(2,'0') + ' ';
+            lines.push(s);
+        }
+        return lines.join('\n');
+    },
+    // Trace sub VRAM writes ($0000-$BFFF) for N frames; collects {pc, addr, val} samples
+    traceSubVramWrites(maxSamples = 5000) {
+        const samples = [];
+        const orig = fm7._subWrite.bind(fm7);
+        fm7._subWrite = function(addr, val) {
+            const a = addr & 0xFFFF;
+            if (a < 0xC000 && samples.length < maxSamples) {
+                samples.push({ pc: fm7.subCPU.pc & 0xFFFF, addr: a, val: val & 0xFF });
+            }
+            return orig(a, val);
+        };
+        return {
+            stop() { fm7._subWrite = orig; return samples; },
+            samples
+        };
+    },
+    // Trace sub READS at PC ranges; returns {pc, addr, val}
+    traceSubReadsAtPC(pcLo, pcHi, maxSamples = 5000) {
+        const samples = [];
+        const orig = fm7._subRead.bind(fm7);
+        fm7._subRead = function(addr) {
+            const a = addr & 0xFFFF;
+            const v = orig(a);
+            const pc = fm7.subCPU.pc & 0xFFFF;
+            if (pc >= pcLo && pc < pcHi && samples.length < maxSamples) {
+                samples.push({ pc, addr: a, val: v });
+            }
+            return v;
+        };
+        return {
+            stop() { fm7._subRead = orig; return samples; },
+            samples
+        };
+    },
+    // Snapshot all key state into one Blob; helps capture "this exact moment"
+    snapshot() {
+        return {
+            mainRAM: this.dumpMain(0x0000, 0x8000),
+            subWork: this.dumpSub(0xC000, 0xD380),
+            sharedRAM: this.dumpSub(0xD380, 0xD400),
+            vram: this.dumpSub(0x0000, 0xC000),
+            mainPC: fm7.mainCPU.pc & 0xFFFF,
+            subPC: fm7.subCPU.pc & 0xFFFF,
+        };
+    },
+    // Save a full snapshot as one .bin (concatenated regions)
+    saveSnapshot(name = 'fm7_snapshot.bin') {
+        const s = this.snapshot();
+        const total = s.mainRAM.length + s.subWork.length + s.sharedRAM.length + s.vram.length;
+        const buf = new Uint8Array(total);
+        let p = 0;
+        buf.set(s.mainRAM, p); p += s.mainRAM.length;        // [0..0x8000)    main RAM
+        buf.set(s.subWork, p); p += s.subWork.length;        // [0x8000..0x9380) sub work
+        buf.set(s.sharedRAM, p); p += s.sharedRAM.length;    // [0x9380..0x9400) shared
+        buf.set(s.vram, p);                                  // [0x9400..0x15400) VRAM (48KB)
+        this.save(name, buf);
+        console.log(`snapshot saved: ${name}`);
+        console.log('layout: mainRAM[0..0x8000) subWork[0x8000..0x9380) sharedRAM[0x9380..0x9400) vram[0x9400..0x15400)');
+        console.log(`mainPC=$${s.mainPC.toString(16)} subPC=$${s.subPC.toString(16)}`);
+    },
+    // Measure rate of PC hitting a set of target addresses over a wall-clock window.
+    // Usage: const r = fm7Debug.pcRate([0x27F6, 0x2222], 5000); // 5s window
+    pcRate(targets, ms = 5000) {
+        const set = new Set(targets.map(t => t & 0xFFFF));
+        const counts = new Map();
+        let last = -1;
+        const origExec = fm7.mainCPU.exec.bind(fm7.mainCPU);
+        fm7.mainCPU.exec = function() {
+            const pc = fm7.mainCPU.pc & 0xFFFF;
+            if (set.has(pc) && pc !== last) counts.set(pc, (counts.get(pc) || 0) + 1);
+            last = pc;
+            return origExec();
+        };
+        const t0 = performance.now();
+        return new Promise(resolve => {
+            setTimeout(() => {
+                fm7.mainCPU.exec = origExec;
+                const dt = (performance.now() - t0) / 1000;
+                const out = {};
+                for (const t of targets) {
+                    const n = counts.get(t & 0xFFFF) || 0;
+                    out['$' + (t & 0xFFFF).toString(16)] = { count: n, perSec: +(n/dt).toFixed(2) };
+                }
+                let line = `pcRate over ${dt.toFixed(2)}s:`;
+                for (const k of Object.keys(out)) {
+                    line += `  ${k} = ${out[k].count} (${out[k].perSec}/sec)`;
+                }
+                console.log(line);
+                resolve(out);
+            }, ms);
+        });
+    },
+    // Timer B state inspector
+    timerB() {
+        return {
+            reg26: '$' + (fm7.opn._timerB ?? 0).toString(16),
+            reg27: '$' + ((fm7.opn._regs?.[0x27] ?? 0)).toString(16),
+            timerBEn: fm7.opn._timerBEn,
+            timerBIRQ: fm7.opn._timerBIRQ,
+            periodOpnClk: fm7.opn._timerBPeriod,
+            clockRatio: fm7.opn._timerClockRatio,
+            periodMsAt2_4576: (fm7.opn._timerBPeriod / 2457600 * 1000).toFixed(2) + 'ms',
+            periodMsAt1_2288: (fm7.opn._timerBPeriod / 1228800 * 1000).toFixed(2) + 'ms',
+        };
+    }
+};
+console.log('fm7Debug available. Try: fm7Debug.saveSnapshot()');
+console.log('  BGM tempo probe: await fm7Debug.pcRate([0x27F6, 0x2222], 5000)');
+console.log('  Timer B inspect: fm7Debug.timerB()');
 const canvas = document.getElementById('screen');
 const screenContainer = document.getElementById('screenContainer');
 
@@ -588,6 +805,8 @@ const statusSubSysEl  = document.getElementById('statusSubSys');
 const statusCGEl      = document.getElementById('statusCG');
 const diskStatusEl0   = document.getElementById('diskStatus0');
 const diskStatusEl1   = document.getElementById('diskStatus1');
+const diskSelectEl0   = document.getElementById('diskSelect0');
+const diskSelectEl1   = document.getElementById('diskSelect1');
 const tapeFileEl      = document.getElementById('tapeFile');
 const tapeStatusEl    = document.getElementById('tapeStatus');
 const cmtLed          = document.getElementById('cmtLed');
@@ -600,7 +819,6 @@ const kbdLedCaps      = document.getElementById('kbdLedCaps');
 const kbdLedKana      = document.getElementById('kbdLedKana');
 const kbdLedIns       = document.getElementById('kbdLedIns');
 const stateValEl      = document.getElementById('stateVal');
-const fpsValEl        = document.getElementById('fpsVal');
 const mainPCValEl     = document.getElementById('mainPCVal');
 const subPCValEl      = document.getElementById('subPCVal');
 const subStateValEl   = document.getElementById('subStateVal');
@@ -610,6 +828,7 @@ const volLabel        = document.getElementById('volLabel');
 const muteBtn         = document.getElementById('muteBtn');
 const fullscreenBtn   = document.getElementById('fullscreenBtn');
 const fpsLabel        = document.getElementById('fpsLabel');
+const dispModeLabel   = document.getElementById('dispModeLabel');
 
 const keyDisplay      = document.getElementById('keyDisplay');
 const paletteRow      = document.getElementById('paletteRow');
@@ -847,14 +1066,50 @@ fddSoundVolume.addEventListener('input', () => {
 });
 
 // =========================================================================
-// Fullscreen
+// Fullscreen (vendor-prefix handling)
 // =========================================================================
 
+const _fsEnabled = document.fullscreenEnabled
+    || document.webkitFullscreenEnabled
+    || document.mozFullScreenEnabled
+    || document.msFullscreenEnabled
+    || false;
+
+function _getFullscreenElement() {
+    return document.fullscreenElement
+        || document.webkitFullscreenElement
+        || document.mozFullScreenElement
+        || document.msFullscreenElement
+        || null;
+}
+
+function _requestFullscreen(el) {
+    if (el.requestFullscreen)            return el.requestFullscreen();
+    if (el.webkitRequestFullscreen)      return el.webkitRequestFullscreen();
+    if (el.mozRequestFullScreen)         return el.mozRequestFullScreen();
+    if (el.msRequestFullscreen)          return el.msRequestFullscreen();
+    return Promise.reject();
+}
+
+function _exitFullscreen() {
+    if (document.exitFullscreen)         return document.exitFullscreen();
+    if (document.webkitExitFullscreen)   return document.webkitExitFullscreen();
+    if (document.mozCancelFullScreen)    return document.mozCancelFullScreen();
+    if (document.msExitFullscreen)       return document.msExitFullscreen();
+    return Promise.reject();
+}
+
+if (!_fsEnabled) {
+    fullscreenBtn.disabled = true;
+    fullscreenBtn.title = 'Fullscreen not supported on this browser';
+}
+
 function toggleFullscreen() {
-    if (document.fullscreenElement) {
-        document.exitFullscreen();
+    if (!_fsEnabled) return;
+    if (_getFullscreenElement()) {
+        _exitFullscreen().catch(() => {});
     } else {
-        screenContainer.requestFullscreen().catch(() => {});
+        _requestFullscreen(screenContainer).catch(() => {});
     }
 }
 
@@ -866,6 +1121,44 @@ document.addEventListener('keydown', (e) => {
         toggleFullscreen();
     }
 });
+
+// Resize canvas/scanlines on fullscreen change (JS sizing for cross-browser compat)
+const _scanlines = screenContainer.querySelector('.scanlines');
+const _DISPLAY_RATIO = 8 / 5;   // 640x400 display (canvas 640x200 stretched 2x)
+const _isFirefox = navigator.userAgent.includes('Firefox');
+
+function _updateFullscreenSize() {
+    const isFull = !!_getFullscreenElement();
+    fullscreenBtn.textContent = isFull ? 'EXIT' : 'FULL';
+    if (isFull && !_isFirefox) {
+        const sw = window.innerWidth, sh = window.innerHeight;
+        let w, h;
+        if (sw / sh > _DISPLAY_RATIO) {
+            h = sh; w = Math.round(sh * _DISPLAY_RATIO);
+        } else {
+            w = sw; h = Math.round(sw / _DISPLAY_RATIO);
+        }
+        canvas.style.width  = w + 'px';
+        canvas.style.height = h + 'px';
+        if (_scanlines) {
+            _scanlines.style.width  = w + 'px';
+            _scanlines.style.height = h + 'px';
+            _scanlines.style.position = 'absolute';
+        }
+    } else {
+        canvas.style.width  = '';
+        canvas.style.height = '';
+        if (_scanlines) {
+            _scanlines.style.width  = '';
+            _scanlines.style.height = '';
+            _scanlines.style.position = '';
+        }
+    }
+}
+
+for (const evt of ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']) {
+    document.addEventListener(evt, _updateFullscreenSize);
+}
 
 // =========================================================================
 // IndexedDB Persistent Storage for ROMs and Disks
@@ -1223,6 +1516,25 @@ function markLoaded(el) {
 // Disk Loading
 // =========================================================================
 
+function updateDiskSelector(driveNum) {
+    const sel = driveNum === 0 ? diskSelectEl0 : diskSelectEl1;
+    const info = fm7.fdc.getDiskList(driveNum);
+    if (info.names.length <= 1) {
+        sel.style.display = 'none';
+        sel.innerHTML = '';
+        return;
+    }
+    sel.innerHTML = '';
+    info.names.forEach((name, i) => {
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = `[${i}] ${name || '(unnamed)'}`;
+        sel.appendChild(opt);
+    });
+    sel.value = String(info.index);
+    sel.style.display = '';
+}
+
 function setupDiskInput(fileInput, statusEl, driveNum) {
     fileInput.addEventListener('change', async (e) => {
         const file = e.target.files[0];
@@ -1234,6 +1546,7 @@ function setupDiskInput(fileInput, statusEl, driveNum) {
                 statusEl.textContent = file.name;
                 statusEl.classList.add('loaded');
                 await saveDisk(`drive${driveNum}`, file.name, data);
+                updateDiskSelector(driveNum);
             } else {
                 statusEl.textContent = 'Fail';
             }
@@ -1246,6 +1559,15 @@ function setupDiskInput(fileInput, statusEl, driveNum) {
 setupDiskInput(diskFileInput0, diskStatusEl0, 0);
 setupDiskInput(diskFileInput1, diskStatusEl1, 1);
 
+function setupDiskSelect(sel, driveNum) {
+    sel.addEventListener('change', () => {
+        const idx = parseInt(sel.value, 10);
+        fm7.fdc.selectDisk(driveNum, idx);
+    });
+}
+setupDiskSelect(diskSelectEl0, 0);
+setupDiskSelect(diskSelectEl1, 1);
+
 // Restore disks from IndexedDB on startup
 (async function restoreDisks() {
     for (const driveNum of [0, 1]) {
@@ -1257,6 +1579,7 @@ setupDiskInput(diskFileInput1, diskStatusEl1, 1);
                     const el = driveNum === 0 ? diskStatusEl0 : diskStatusEl1;
                     el.textContent = saved.name + ' (restored)';
                     el.classList.add('loaded');
+                    updateDiskSelector(driveNum);
                 }
             } catch (err) {
                 console.warn(`Failed to restore disk drive ${driveNum}:`, err);
@@ -1406,6 +1729,9 @@ function setupDiskEject(btn, fileInput, statusEl, driveNum) {
         fileInput.value = '';
         statusEl.textContent = '--';
         statusEl.classList.remove('loaded');
+        const sel = driveNum === 0 ? diskSelectEl0 : diskSelectEl1;
+        sel.style.display = 'none';
+        sel.innerHTML = '';
         await dbDelete(STORE_DISKS, `drive${driveNum}`);
     });
 }
@@ -1609,10 +1935,14 @@ breakKeyBtn.addEventListener('click', () => {
 // Status Update Timer
 // =========================================================================
 
-setInterval(() => {
+fm7._frameCallback = () => {
     const status = fm7.getStatus();
-    fpsValEl.textContent = status.running ? status.fps : '--';
     fpsLabel.textContent = status.running ? status.fps + ' fps' : '--';
+    {
+        const d = fm7.display;
+        const baseMode = d.displayMode === 0 ? '640x200' : '320x200';
+        dispModeLabel.textContent = baseMode;
+    }
     mainPCValEl.textContent = '$' + status.mainPC.toString(16).toUpperCase().padStart(4, '0');
     subPCValEl.textContent = '$' + status.subPC.toString(16).toUpperCase().padStart(4, '0');
     subStateValEl.textContent = status.subHalted ? 'HALT' : 'RUN';
@@ -1662,17 +1992,45 @@ setInterval(() => {
             fm7.psg.regs[i].toString(16).toUpperCase().padStart(2, '0');
     }
 
-    // FM77AV debug info
+    // FM77AV-only debug info
     if (status.machineType === MACHINE_FM77AV) {
-        const monNames = ['Type-A', 'Type-B', 'Type-C'];
+        const monNames = ['Type-C', 'Type-A', 'Type-B'];
         subMonVal.textContent = monNames[status.subMonitorType] || '??';
         initVal.textContent = status.initiatorActive ? 'ACTIVE' : 'OFF';
         initVal.style.color = status.initiatorActive ? '#e8a848' : '#6688aa';
-        const d = fm7.display;
-        document.getElementById('vramPageVal').textContent =
-            'W:' + d.activeVramPage + ' D:' + d.displayVramPage;
-        document.getElementById('dispModeVal').textContent =
-            d.displayMode === 0 ? '640x200' : '320x200';
+
+        document.getElementById('bootRamVal').textContent = fm7._basicRomEnabled ? 'ROM' : 'RAM';
+        document.getElementById('mmrVal').textContent = fm7._mmrEnabled ? 'ON' : 'OFF';
+        document.getElementById('mmrBankVal').textContent = '$' + (fm7._mmrBankReg & 7).toString(16);
+        document.getElementById('twrVal').textContent = fm7._twrFlag ? 'ON' : 'OFF';
+        document.getElementById('twrOffsetVal').textContent = '$' + (fm7._twrReg & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+
+        const mmrMapLabel = document.getElementById('mmrMapLabel');
+        const mmrMapGrid  = document.getElementById('mmrMapGrid');
+        const physMapLabel = document.getElementById('physMapLabel');
+        const physMapGrid  = document.getElementById('physMapGrid');
+        mmrMapLabel.style.display = '';
+        mmrMapGrid.style.display  = '';
+        physMapLabel.style.display = '';
+        physMapGrid.style.display  = '';
+        const bankOff = (fm7._mmrBankReg & 7) * 16;
+        let mmrRows = '';
+        let physRows = '';
+        for (let seg = 0; seg < 16; seg++) {
+            const phys = fm7._mmrRegs[bankOff + seg] & 0xFF;
+            const logHi = (seg * 0x1000).toString(16).toUpperCase().padStart(4, '0');
+            const physAddr = (phys * 0x1000).toString(16).toUpperCase().padStart(5, '0');
+            const physPg = phys.toString(16).toUpperCase().padStart(2, '0');
+            mmrRows += `$${logHi}-$${((seg*0x1000)+0xFFF).toString(16).toUpperCase().padStart(4,'0')} → page $${physPg}\n`;
+            let region;
+            if (phys < 0x30) region = 'ext RAM';
+            else if (phys < 0x40) region = 'main RAM';
+            else if (phys >= 0xF8 && phys < 0xFC) region = 'shared';
+            else region = 'other';
+            physRows += `seg ${seg.toString(16).toUpperCase()} → $${physAddr} (${region})\n`;
+        }
+        mmrMapGrid.textContent  = mmrRows;
+        physMapGrid.textContent = physRows;
 
         // Update analog palette canvas (4096 colors in 64x64 grid)
         analogPaletteSection.style.display = '';
@@ -1689,6 +2047,14 @@ setInterval(() => {
         }
     } else {
         analogPaletteSection.style.display = 'none';
+        const mmrMapLabel = document.getElementById('mmrMapLabel');
+        const mmrMapGrid  = document.getElementById('mmrMapGrid');
+        const physMapLabel = document.getElementById('physMapLabel');
+        const physMapGrid  = document.getElementById('physMapGrid');
+        if (mmrMapLabel)  mmrMapLabel.style.display  = 'none';
+        if (mmrMapGrid)   mmrMapGrid.style.display   = 'none';
+        if (physMapLabel) physMapLabel.style.display = 'none';
+        if (physMapGrid)  physMapGrid.style.display  = 'none';
     }
 
     // Stall detector: detects both exact-PC stalls and range-loop stalls
@@ -1701,12 +2067,12 @@ setInterval(() => {
         window._subPCMin = Math.min(window._subPCMin, subPC);
         window._subPCMax = Math.max(window._subPCMax, subPC);
         window._rangeCount++;
-        // Every 10 samples (5 sec), check if sub CPU is in a tight loop
-        if (window._rangeCount >= 10 && !window._stallDumped) {
+        // Every 300 samples (~5 sec at 60fps), check if sub CPU is in a tight loop
+        if (window._rangeCount >= 300 && !window._stallDumped) {
             const range = window._subPCMax - window._subPCMin;
             if (range < 256 && range > 0) {
                 // Sub CPU stuck in small range - trigger dump
-                window._stallCount = 6;
+                window._stallCount = 180;
             }
             window._subPCMin = 0xFFFF; window._subPCMax = 0; window._rangeCount = 0;
         }
@@ -1715,9 +2081,9 @@ setInterval(() => {
             window._stallCount = (window._stallCount || 0) + 1;
         } else if (!window._stallDumped) {
             // Only reset if range detector hasn't already triggered
-            if ((window._stallCount || 0) < 6) window._stallCount = 0;
+            if ((window._stallCount || 0) < 180) window._stallCount = 0;
         }
-        if (window._stallCount >= 6 && !window._stallDumped) {
+        if (window._stallCount >= 180 && !window._stallDumped) {
                 window._stallDumped = true;
                 const hex = (a, n) => {
                     const b = [];
@@ -1779,7 +2145,7 @@ setInterval(() => {
         window._lastMainPC = mainPC;
         window._lastSubPC = subPC;
     }
-}, 500);
+};
 
 // =========================================================================
 // Canvas focus
@@ -1815,17 +2181,25 @@ document.getElementById('inputPanelClose').addEventListener('click', () => {
 // Debug Panel
 // =========================================================================
 
-const debugPanel = document.getElementById('debugPanel');
-const debugPanelBtn = document.getElementById('debugPanelBtn');
+function wireDebugPanel(panelId, btnId, closeId) {
+    const panel = document.getElementById(panelId);
+    const btn = document.getElementById(btnId);
+    const closeBtn = document.getElementById(closeId);
+    btn.addEventListener('click', () => {
+        panel.classList.toggle('open');
+        btn.classList.toggle('active');
+    });
+    closeBtn.addEventListener('click', () => {
+        panel.classList.remove('open');
+        btn.classList.remove('active');
+    });
+    return panel;
+}
 
-debugPanelBtn.addEventListener('click', () => {
-    debugPanel.classList.toggle('open');
-    debugPanelBtn.classList.toggle('active');
-});
-document.getElementById('debugPanelClose').addEventListener('click', () => {
-    debugPanel.classList.remove('open');
-    debugPanelBtn.classList.remove('active');
-});
+const debugPanel = wireDebugPanel('debugPanel', 'debugPanelBtn', 'debugPanelClose');
+const keyPanel   = wireDebugPanel('keyPanel',   'keyPanelBtn',   'keyPanelClose');
+const palPanel   = wireDebugPanel('palPanel',   'palPanelBtn',   'palPanelClose');
+const sndPanel   = wireDebugPanel('sndPanel',   'sndPanelBtn',   'sndPanelClose');
 
 // =========================================================================
 // Draggable Panels
@@ -1865,6 +2239,241 @@ function makeDraggable(panel) {
 
 makeDraggable(inputPanel);
 makeDraggable(debugPanel);
+makeDraggable(keyPanel);
+makeDraggable(palPanel);
+makeDraggable(sndPanel);
+
+// =========================================================================
+// State Dump (CPU / VRAM / I/O / Palette / ROM checksums / memory near PC)
+// =========================================================================
+
+function _crc32(bytes) {
+    // Simple CRC-32 (IEEE 802.3). Cached polynomial table.
+    if (!_crc32._table) {
+        const t = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            t[n] = c >>> 0;
+        }
+        _crc32._table = t;
+    }
+    const t = _crc32._table;
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return ((c ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, '0');
+}
+
+function generateStateDump() {
+    const h2 = v => (v & 0xFF).toString(16).padStart(2,'0');
+    const h4 = v => (v & 0xFFFF).toString(16).padStart(4,'0');
+    const mainHex = (a, n) => { const b=[]; for (let i=0;i<n;i++) b.push(h2(fm7._mainRead((a+i)&0xFFFF))); return b.join(' '); };
+    const subHex  = (a, n) => { const b=[]; for (let i=0;i<n;i++) b.push(h2(fm7._subRead((a+i)&0xFFFF)));  return b.join(' '); };
+    const ioR = a => { try { return h2(fm7._mainIORead(a)); } catch(e) { return '??'; } };
+
+    const mc = fm7.mainCPU, sc = fm7.subCPU;
+    const d = fm7.display;
+    const lines = [];
+    const ts = new Date().toISOString();
+    lines.push(`=== DevM7 State Dump ${ts} ===`);
+    lines.push(`Machine: ${fm7.isFM77AV ? 'fm77av' : 'fm7'} (type=${fm7._machineType})`);
+    lines.push('');
+
+    // --- ROM checksums ---
+    lines.push('[ROMs]');
+    const romBlobs = [
+        ['F-BASIC',    fm7.fbasicROM,    fm7.romLoaded && fm7.romLoaded.fbasic],
+        ['Boot',       fm7.bootROM,      fm7.romLoaded && fm7.romLoaded.boot],
+        ['Boot-BAS',   fm7.bootBasROM,   fm7.romLoaded && fm7.romLoaded.bootBas],
+        ['Sub (C)',    fm7.subROM,       fm7.romLoaded && fm7.romLoaded.sub],
+        ['Sub (A)',    fm7.subROM_A,     fm7.romLoaded && fm7.romLoaded.subA],
+        ['Sub (B)',    fm7.subROM_B,     fm7.romLoaded && fm7.romLoaded.subB],
+        ['Initiate',   fm7.initiateROM,  fm7.romLoaded && fm7.romLoaded.initiate],
+        ['CG',         fm7.cgROM,        fm7.romLoaded && fm7.romLoaded.cg],
+    ];
+    for (const [name, buf, loaded] of romBlobs) {
+        if (buf && buf.length) {
+            lines.push(`  ${name.padEnd(10)} size=${buf.length.toString().padStart(6)} crc32=${_crc32(buf)} loaded=${!!loaded}`);
+        } else {
+            lines.push(`  ${name.padEnd(10)} <not loaded>`);
+        }
+    }
+    lines.push('');
+
+    // --- Main CPU ---
+    const mPC = mc.pc & 0xFFFF;
+    lines.push('[Main CPU (MB6809)]');
+    lines.push(`  PC=$${h4(mPC)} SP=$${h4(mc.s||0)} USP=$${h4(mc.u||0)} X=$${h4(mc.x||0)} Y=$${h4(mc.y||0)}`);
+    lines.push(`  A=$${h2(mc.a||0)} B=$${h2(mc.b||0)} DP=$${h2(mc.dp||0)} CC=$${h2(mc.cc||0)}  intr=$${h2(mc.intr||0)}`);
+    lines.push(`  Code @PC-16: ${mainHex(mPC - 16, 16)}`);
+    lines.push(`  Code @PC   : ${mainHex(mPC, 32)}`);
+    lines.push(`  Stack @SP  : ${mainHex((mc.s||0), 16)}`);
+    lines.push('');
+
+    // --- Sub CPU ---
+    const sPC = sc.pc & 0xFFFF;
+    lines.push('[Sub CPU (MB6809)]');
+    lines.push(`  PC=$${h4(sPC)} SP=$${h4(sc.s||0)} USP=$${h4(sc.u||0)} X=$${h4(sc.x||0)} Y=$${h4(sc.y||0)}`);
+    lines.push(`  A=$${h2(sc.a||0)} B=$${h2(sc.b||0)} DP=$${h2(sc.dp||0)} CC=$${h2(sc.cc||0)}  intr=$${h2(sc.intr||0)}`);
+    lines.push(`  Halted=${fm7._subHalted} Busy=${fm7._subBusy} Attn=${fm7._subAttn} NMImask=${fm7._nmiMaskSub} BREAK=${fm7._breakKey}`);
+    lines.push(`  Monitor bank: ${fm7._subMonitorType} (0=C,1=A,2=B)`);
+    lines.push(`  Code @PC-16: ${subHex(sPC - 16, 16)}`);
+    lines.push(`  Code @PC   : ${subHex(sPC, 32)}`);
+    lines.push(`  Stack @SP  : ${subHex((sc.s||0), 16)}`);
+    const sv = a => { const hi=fm7._subRead(a), lo=fm7._subRead(a+1); return '$'+h4((hi<<8)|lo); };
+    lines.push(`  Vectors: NMI=${sv(0xFFFC)} FIRQ=${sv(0xFFF6)} IRQ=${sv(0xFFF8)} RST=${sv(0xFFFE)}`);
+    lines.push('');
+
+    // --- Main I/O ($FD00-$FD1F, $FD30-$FD4F, $FD80-$FD9F) ---
+    lines.push('[Main I/O]');
+    const ioLine = (start, n) => {
+        const row = [];
+        for (let i = 0; i < n; i++) row.push(ioR(start + i));
+        return `  $${h4(start)}: ${row.join(' ')}`;
+    };
+    lines.push(ioLine(0xFD00, 16));
+    lines.push(ioLine(0xFD10, 16));
+    lines.push(ioLine(0xFD20, 16));
+    lines.push(ioLine(0xFD30, 16));
+    lines.push(ioLine(0xFD40, 16));
+    if (fm7.isFM77AV) {
+        lines.push(ioLine(0xFD80, 16));
+        lines.push(ioLine(0xFD90, 16));
+        lines.push(ioLine(0xFDE0, 8));
+    }
+    lines.push('');
+
+    // --- Sub I/O ($D400-$D40F) and shared RAM ($D380-$D3BF) ---
+    lines.push('[Sub I/O / Shared RAM]');
+    lines.push(`  $D400-D40F: ${subHex(0xD400, 16)}`);
+    lines.push(`  $D380 shared: ${subHex(0xD380, 16)}`);
+    lines.push(`  $D390 shared: ${subHex(0xD390, 16)}`);
+    lines.push(`  $D3A0 shared: ${subHex(0xD3A0, 16)}`);
+    lines.push(`  $D3B0 shared: ${subHex(0xD3B0, 16)}`);
+    lines.push('');
+
+    // --- Display / VRAM ---
+    lines.push('[Display]');
+    lines.push(`  Mode=${d.displayMode} ActivePage=${d.activeVramPage} DisplayPage=${d.displayVramPage}`);
+    lines.push(`  MISC=$${h2(d.miscReg||0)} multiPage=$${h2(d.multiPage||0)} vramaFlag=${d.vramaFlag}`);
+    lines.push(`  ALU cmd=$${h2(d.aluCommand||0)} color=$${h2(d.aluColor||0)} mask=$${h2(d.aluMask||0)} disable=$${h2(d.aluDisable||0)}`);
+    const co = d.crtcOffset || [0,0];
+    const vo = d.vramOffset || [0,0];
+    lines.push(`  crtcOffset=[$${h4(co[0])},$${h4(co[1])}] vramOffset=[$${h4(vo[0])},$${h4(vo[1])}]`);
+    lines.push('');
+
+    // --- Palette ---
+    lines.push('[Palette Digital ($FD38-$FD3F)]');
+    const pal = [];
+    for (let i = 0; i < 8; i++) pal.push(h2((d.palette && d.palette[i]) || 0));
+    lines.push(`  ${pal.join(' ')}`);
+    if (fm7.isFM77AV && fm7._analogPalette) {
+        lines.push('[Palette Analog 4096 (12-bit RGB, 16 entries per line)]');
+        for (let row = 0; row < 4096; row += 16) {
+            const ap = [];
+            for (let i = 0; i < 16; i++) {
+                ap.push(h4(fm7._analogPalette[row + i] || 0));
+            }
+            lines.push(`  ${h4(row)}: ${ap.join(' ')}`);
+        }
+    }
+    lines.push('');
+
+    // --- VRAM (both pages, base64-encoded for compactness) ---
+    const vramToB64 = (arr) => {
+        if (!arr) return '(none)';
+        let bin = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < arr.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, arr.subarray(i, Math.min(i + CHUNK, arr.length)));
+        }
+        return btoa(bin);
+    };
+    const p0 = fm7.display && fm7.display.vram;
+    const p1 = fm7.display && fm7.display.vramPage1;
+    if (p0) {
+        lines.push('[VRAM Page 0 (base64, 48KB raw: plane B $0000-$3FFF, R $4000-$7FFF, G $8000-$BFFF)]');
+        const b64 = vramToB64(p0);
+        for (let i = 0; i < b64.length; i += 76) lines.push('  ' + b64.substr(i, 76));
+        lines.push('');
+    }
+    if (p1) {
+        lines.push('[VRAM Page 1 (base64, 48KB raw: plane B/R/G)]');
+        const b64 = vramToB64(p1);
+        for (let i = 0; i < b64.length; i += 76) lines.push('  ' + b64.substr(i, 76));
+        lines.push('');
+    }
+
+    // --- MMR (FM77AV) ---
+    if (fm7.isFM77AV && fm7._mmrRegs) {
+        lines.push('[MMR]');
+        lines.push(`  enabled=${fm7._mmrEnabled} bankReg($FD90)=$${h2(fm7._mmrBankReg||0)} basicROM=${fm7._basicRomEnabled}`);
+        const mr = fm7._mmrRegs;
+        const b0 = Array.from(mr.slice(0, 16)).map(h2).join(' ');
+        const b1 = Array.from(mr.slice(16, 32)).map(h2).join(' ');
+        lines.push(`  bank0: ${b0}`);
+        lines.push(`  bank1: ${b1}`);
+        lines.push('');
+    }
+
+    // --- FDC ---
+    if (fm7.fdc) {
+        const f = fm7.fdc;
+        lines.push('[FDC (MB8877/WD179x)]');
+        lines.push(`  status=$${h2(f.statusReg||0)} track=${f.trackReg} sector=${f.sectorReg} data=$${h2(f.dataReg||0)}`);
+        lines.push(`  drq=${f.drqFlag} irq=${f.irqFlag} state=${f.state} motor=${f.motorOn} drive=${f.currentDrive} side=${f.sideReg||0}`);
+        const disks = [];
+        for (let i = 0; i < 4; i++) {
+            const dk = f.disks && f.disks[i];
+            if (dk) disks.push(`D${i}:loaded`);
+        }
+        lines.push(`  disks: ${disks.join(' ') || 'none'}`);
+        lines.push('');
+    }
+
+    // --- OPN/PSG ---
+    if (fm7.opn) {
+        const o = fm7.opn;
+        lines.push('[OPN]');
+        lines.push(`  timerA=${o.timerAFlag?'on':'off'} timerB=${o.timerBFlag?'on':'off'} status=$${h2(o._status||0)}`);
+        lines.push('');
+    }
+
+    lines.push('=== End of Dump ===');
+    return lines.join('\n');
+}
+
+const stateDumpBtn   = document.getElementById('stateDumpBtn');
+const stateDumpModal = document.getElementById('stateDumpModal');
+const stateDumpText  = document.getElementById('stateDumpText');
+const stateDumpCopy  = document.getElementById('stateDumpCopy');
+const stateDumpClose = document.getElementById('stateDumpClose');
+
+if (stateDumpBtn) {
+    stateDumpBtn.addEventListener('click', () => {
+        try {
+            stateDumpText.value = generateStateDump();
+        } catch (e) {
+            stateDumpText.value = `Dump failed: ${e.message}\n${e.stack}`;
+        }
+        stateDumpModal.style.display = 'flex';
+    });
+    stateDumpClose.addEventListener('click', () => {
+        stateDumpModal.style.display = 'none';
+    });
+    stateDumpCopy.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(stateDumpText.value);
+            stateDumpCopy.textContent = 'Copied!';
+            setTimeout(() => { stateDumpCopy.textContent = 'Copy'; }, 1200);
+        } catch (e) {
+            stateDumpText.select();
+            document.execCommand('copy');
+            stateDumpCopy.textContent = 'Copied (fallback)';
+            setTimeout(() => { stateDumpCopy.textContent = 'Copy'; }, 1200);
+        }
+    });
+}
 
 // =========================================================================
 // Analog Palette (FM77AV)

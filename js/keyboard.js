@@ -85,7 +85,7 @@ const CODE_TO_FM7_ASCII = new Map([
     // Symbols
     ['Minus', 0x2D], ['Equal', 0x3D], ['BracketLeft', 0x5B],
     ['BracketRight', 0x5D], ['Backslash', 0x5C], ['Semicolon', 0x3B],
-    ['Quote', 0x27], ['Comma', 0x2C], ['Period', 0x2E], ['Slash', 0x2F],
+    ['Quote', 0x3A], ['Comma', 0x2C], ['Period', 0x2E], ['Slash', 0x2F],
     ['NumpadAdd', 0x2B], ['NumpadSubtract', 0x2D], ['NumpadMultiply', 0x2A],
     ['NumpadDivide', 0x2F], ['NumpadDecimal', 0x2E], ['NumpadEnter', 0x0D],
     // Control keys
@@ -190,6 +190,90 @@ const SHIFTED_OVERRIDE = new Map([
 ]);
 
 /**
+ * KANA mode key mapping (JIS X 0201 half-width katakana).
+ * FM-7 standard JIS keyboard layout.
+ */
+const KANA_OVERRIDE = new Map([
+    ['Digit1', 0xC7], ['Digit2', 0xCC], ['Digit3', 0xB1], ['Digit4', 0xB3],
+    ['Digit5', 0xB4], ['Digit6', 0xB5], ['Digit7', 0xD4], ['Digit8', 0xD5],
+    ['Digit9', 0xD6], ['Digit0', 0xDC],
+    ['Minus', 0xCE], ['Equal', 0xCD], ['Backslash', 0xB0],
+    ['KeyQ', 0xC0], ['KeyW', 0xC3], ['KeyE', 0xB2], ['KeyR', 0xBD],
+    ['KeyT', 0xB6], ['KeyY', 0xDD], ['KeyU', 0xC5], ['KeyI', 0xC6],
+    ['KeyO', 0xD7], ['KeyP', 0xBE],
+    ['BracketLeft', 0xDE], ['BracketRight', 0xDF],
+    ['KeyA', 0xC1], ['KeyS', 0xC4], ['KeyD', 0xBC], ['KeyF', 0xCA],
+    ['KeyG', 0xB7], ['KeyH', 0xB8], ['KeyJ', 0xCF], ['KeyK', 0xC9],
+    ['KeyL', 0xD8],
+    ['Semicolon', 0xDA], ['Quote', 0xB9],
+    ['KeyZ', 0xC2], ['KeyX', 0xBB], ['KeyC', 0xBF], ['KeyV', 0xCB],
+    ['KeyB', 0xBA], ['KeyN', 0xD0], ['KeyM', 0xD3],
+    ['Comma', 0xC8], ['Period', 0xD9], ['Slash', 0xD2],
+    ['IntlRo', 0xDB],
+]);
+
+/**
+ * KANA + Shift overrides (small kana and symbols).
+ */
+const KANA_SHIFT_OVERRIDE = new Map([
+    ['Digit0', 0xA6],  // ヲ
+    ['Digit3', 0xA7],  // ァ
+    ['Digit4', 0xA9],  // ゥ
+    ['Digit5', 0xAA],  // ェ
+    ['Digit6', 0xAB],  // ォ
+    ['Digit7', 0xAC],  // ャ
+    ['Digit8', 0xAD],  // ュ
+    ['Digit9', 0xAE],  // ョ
+    ['KeyE',   0xA8],  // ィ
+    ['KeyZ',   0xAF],  // ッ
+    ['Comma',  0xA4],  // 、
+    ['Period', 0xA1],  // 。
+    ['Slash',  0xA5],  // ・
+    ['BracketLeft',  0xA2],  // 「
+    ['BracketRight', 0xA3],  // 」
+]);
+
+/**
+ * GRPH mode key mapping.
+ * GRPH is a momentary modifier (held like Shift). While held, keys
+ * produce FM-7 graphic character codes ($80-$FF range).
+ * Table derived from FM-7 keyboard encoder firmware.
+ */
+const GRPH_OVERRIDE = new Map([
+    // Top row
+    ['Escape', 0x1B],
+    ['Digit1', 0xF9], ['Digit2', 0xFA], ['Digit3', 0xFB], ['Digit4', 0xFC],
+    ['Digit5', 0xF2], ['Digit6', 0xF3], ['Digit7', 0xF4], ['Digit8', 0xF5],
+    ['Digit9', 0xF6], ['Digit0', 0xF7],
+    ['Minus', 0x8C], ['Equal', 0x8B], ['Backslash', 0xF1], ['Backspace', 0x08],
+    // QWERTY row
+    ['Tab', 0x09],
+    ['KeyQ', 0xFD], ['KeyW', 0xF8], ['KeyE', 0xE4], ['KeyR', 0xE5],
+    ['KeyT', 0x9C], ['KeyY', 0x9D], ['KeyU', 0xF0], ['KeyI', 0xE8],
+    ['KeyO', 0xE9], ['KeyP', 0x8D],
+    ['BracketLeft', 0xED], ['Enter', 0x0D],
+    // ASDF row
+    ['KeyA', 0x95], ['KeyS', 0x96], ['KeyD', 0xE6], ['KeyF', 0xE7],
+    ['KeyG', 0x9E], ['KeyH', 0x9F], ['KeyJ', 0xEA], ['KeyK', 0xEB],
+    ['KeyL', 0x8E],
+    ['Semicolon', 0x99], ['Quote', 0x94], ['BracketRight', 0xEC],
+    // ZXCV row
+    ['KeyZ', 0x80], ['KeyX', 0x81], ['KeyC', 0x82], ['KeyV', 0x83],
+    ['KeyB', 0x84], ['KeyN', 0x85], ['KeyM', 0x86],
+    ['Comma', 0x87], ['Period', 0x88], ['Slash', 0x97], ['IntlRo', 0xE0],
+    // Cursor / editing
+    ['Insert', 0x12], ['Delete', 0x7F],
+]);
+
+const GRPH_SHIFT_OVERRIDE = new Map([
+    ['ArrowUp', 0x19], ['ArrowLeft', 0x02], ['ArrowDown', 0x1A], ['ArrowRight', 0x06],
+]);
+
+const GRPH_CURSOR = new Map([
+    ['ArrowUp', 0x1E], ['ArrowLeft', 0x1D], ['ArrowDown', 0x1F], ['ArrowRight', 0x1C],
+]);
+
+/**
  * Maximum number of key events in the buffer.
  * FM-7 hardware has a small buffer; 16 is generous.
  */
@@ -216,10 +300,20 @@ export class Keyboard {
         this._currentKey = 0x00;
 
         /**
-         * True when a key event is pending (not yet read by the CPU).
-         * $FD00 bit 7 reflects this.
+         * True when an unread key is in the data register.
+         * Cleared when CPU reads $FD01 (and advanced from buffer if any).
+         * Drives IRQ line and distinguishes "pending to consume" state.
          */
         this._keyAvailable = false;
+
+        /**
+         * Persistent $FD00 status latch. Set true when the first key
+         * arrives; stays true (matching real-HW behavior where the key
+         * data register retains its last value). IRQ handlers commonly
+         * read $FD01 then check $FD00 to confirm valid data — this
+         * requires $FD00 to remain asserted after $FD01 read.
+         */
+        this._fd00Latch = false;
 
         /**
          * Keyboard IRQ mask.  Written via $FD02 bit 0.
@@ -255,6 +349,8 @@ export class Keyboard {
         this.capsLock = false;
         this.kanaMode = false;
         this.insMode = false;
+        // GRPH: momentary modifier (true while held)
+        this.graphMode = false;
 
         // --- Custom key remapping ---
         /** @type {Map<string, string>} PC event.code → PC event.code remap */
@@ -283,6 +379,12 @@ export class Keyboard {
         } else if (code === 'AltRight' || code === 'KanaMode') {
             // Alt-Right or Kana key → カナ toggle
             this.kanaMode = !this.kanaMode;
+        } else if (code === 'AltLeft') {
+            // GRPH: momentary (set on press, cleared on release)
+            this.graphMode = true;
+            event.preventDefault();
+            this._heldKeys.add(code);
+            return;
         }
 
         const fm7Code = this._mapKey(code, event.shiftKey);
@@ -291,7 +393,10 @@ export class Keyboard {
         event.preventDefault();
         // Track by original code so keyUp can match correctly
         this._heldKeys.add(code);
-        this._pushKey(fm7Code & 0x7F);
+        // ASCII mode: preserve full 8 bits (KANA/GRPH use $80-$FF).
+        // Scan-code mode: break bit is applied separately; mask to 7 bits.
+        const mask = this._useScanCodes ? 0x7F : 0xFF;
+        this._pushKey(fm7Code & mask);
     }
 
     /**
@@ -304,6 +409,10 @@ export class Keyboard {
      */
     keyUp(event) {
         const code = event.code;
+
+        if (code === 'AltLeft') {
+            this.graphMode = false;
+        }
 
         if (!this._heldKeys.has(code)) return;
         this._heldKeys.delete(code);
@@ -337,17 +446,25 @@ export class Keyboard {
     readIO(addr) {
         switch (addr) {
             case 0xFD00:
-                // Keyboard status register:
-                // bit 7: 0 = key data available, 1 = no data (ACTIVE LOW!)
-                return this._keyAvailable ? 0x7F : 0xFF;
+                // Keyboard status register. Persistent latch: true after
+                // first key arrives, stays true regardless of $FD01 reads
+                // (matches real HW; IRQ handlers rely on this).
+                return this._fd00Latch ? 0x7F : 0xFF;
 
-            case 0xFD01:
-                // Keyboard data register:
+            case 0xFD01: {
+                // Keyboard data register. Clears IRQ flag and advances
+                // buffer. Does NOT clear $FD00 latch.
                 this._irqFlag = false;
-                this._keyAvailable = false;
                 const data = this._currentKey;
-                this._prepareNext();
+                if (this._buffer.length > 0) {
+                    this._currentKey = this._buffer.shift();
+                    this._keyAvailable = true;
+                    this._assertIRQ();
+                } else {
+                    this._keyAvailable = false;
+                }
                 return data;
+            }
 
             default:
                 return 0xFF;  // unmapped
@@ -382,7 +499,6 @@ export class Keyboard {
      * @returns {boolean}
      */
     hasKey() {
-        this._prepareNext();
         return this._keyAvailable;
     }
 
@@ -391,7 +507,6 @@ export class Keyboard {
      * @returns {number} FM-7 key code (7-bit + break bit), or 0 if none
      */
     getKeyData() {
-        this._prepareNext();
         return this._keyAvailable ? this._currentKey : 0x00;
     }
 
@@ -457,12 +572,14 @@ export class Keyboard {
         this._buffer.length = 0;
         this._currentKey = 0x00;
         this._keyAvailable = false;
+        this._fd00Latch = false;
         this._irqMask = 1; // key IRQ masked on init (keyboard via sub CPU FIRQ)
         this._irqFlag = false;
         this._heldKeys.clear();
         this.capsLock = false;
         this.kanaMode = false;
         this.insMode = false;
+        this.graphMode = false;
     }
 
     // ------------------------------------------------------------------
@@ -480,12 +597,47 @@ export class Keyboard {
         // Apply custom remap: PC code → PC code
         const remapped = this._customMap.get(code) || code;
 
-        const table = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
-        if (!this._useScanCodes && shifted && SHIFTED_OVERRIDE.has(remapped)) {
+        // Scan code mode (FM77AV): CAPS/KANA are separate modifier keys,
+        // they don't alter the scan code itself. OS reads LED state.
+        if (this._useScanCodes) {
+            return CODE_TO_FM7_SCAN.has(remapped)
+                ? CODE_TO_FM7_SCAN.get(remapped) : FM7_KEY_NONE;
+        }
+
+        // ASCII mode: GRPH has highest priority (momentary modifier).
+        if (this.graphMode) {
+            if (shifted && GRPH_SHIFT_OVERRIDE.has(remapped)) {
+                return GRPH_SHIFT_OVERRIDE.get(remapped);
+            }
+            if (GRPH_CURSOR.has(remapped)) {
+                return GRPH_CURSOR.get(remapped);
+            }
+            if (GRPH_OVERRIDE.has(remapped)) {
+                return GRPH_OVERRIDE.get(remapped);
+            }
+        }
+
+        // ASCII mode: apply KANA → SHIFT → CAPS in priority order.
+        if (this.kanaMode) {
+            if (shifted && KANA_SHIFT_OVERRIDE.has(remapped)) {
+                return KANA_SHIFT_OVERRIDE.get(remapped);
+            }
+            if (KANA_OVERRIDE.has(remapped)) {
+                return KANA_OVERRIDE.get(remapped);
+            }
+        }
+
+        if (shifted && SHIFTED_OVERRIDE.has(remapped)) {
             return SHIFTED_OVERRIDE.get(remapped);
         }
-        if (table.has(remapped)) {
-            return table.get(remapped);
+
+        if (CODE_TO_FM7_ASCII.has(remapped)) {
+            let c = CODE_TO_FM7_ASCII.get(remapped);
+            // CAPS ON: lowercase letters → uppercase
+            if (this.capsLock && c >= 0x61 && c <= 0x7A) {
+                c -= 0x20;
+            }
+            return c;
         }
         return FM7_KEY_NONE;
     }
@@ -501,24 +653,15 @@ export class Keyboard {
             this._buffer.shift();
         }
         this._buffer.push(keyCode);
+        // Mark the $FD00 latch as valid — any key arrival sets it.
+        this._fd00Latch = true;
 
         // If no key is currently staged, load immediately
         if (!this._keyAvailable) {
-            this._prepareNext();
+            this._currentKey = this._buffer.shift();
+            this._keyAvailable = true;
+            this._assertIRQ();
         }
-    }
-
-    /**
-     * If no key is currently staged for reading, dequeue the next one
-     * from the buffer and stage it.
-     */
-    _prepareNext() {
-        if (this._keyAvailable) return;
-        if (this._buffer.length === 0) return;
-
-        this._currentKey = this._buffer.shift();
-        this._keyAvailable = true;
-        this._assertIRQ();
     }
 
     /**
