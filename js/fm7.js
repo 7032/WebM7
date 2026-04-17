@@ -2692,27 +2692,23 @@ export class FM7 {
                     // Enable timer IRQ ($FD02 bit 2).
                     this._irqMaskReg |= 0x04;
 
-                    // Skip the IPL entirely — jump to F-BASIC cold start.
-                    // The IPL would modify parameter tables at $0102/$010A
-                    // (incrementing sector counts past max), and F-BASIC
-                    // reuses those tables. Entering at $0100 would cause
-                    // reads of non-existent sectors. Instead, enter at
-                    // the F-BASIC cold start address.
-                    if (this.romLoaded.fbasic) {
+                    // Determine entry point based on IPL type.
+                    // F-BASIC IPLs have parameter tables (type=$0A) at
+                    // offsets $02/$0A. These modify the table counters
+                    // during loading, so entering at $0100 would cause
+                    // F-BASIC to reuse corrupted tables. Jump to F-BASIC
+                    // cold start instead.
+                    // Standalone IPLs (no parameter tables) run their own
+                    // code from $0100 and never call F-BASIC.
+                    const hasFBasicTables = tabA.type === 0x0A || tabB.type === 0x0A;
+                    if (this.romLoaded.fbasic && hasFBasicTables) {
                         const coldStart = (this.fbasicROM[0x7BFE] << 8) | this.fbasicROM[0x7BFF];
-                        // The IPL sets A=$FF (nonzero = disk boot) and
-                        // X = Table A buffer start (top of usable RAM,
-                        // DOS code resides from here to $7FFF).
-                        // F-BASIC cold start uses TSTA; BNE to decide
-                        // whether to use X as memory top or default $8000.
                         const dosBase = (tabA.bufHi << 8) | tabA.bufLo;
-                        // Defer register setup — mainCPU.reset() runs after
-                        // _dosBootDirect() returns and would wipe these.
                         this._bootRegs = { a: 0xFF, x: dosBase };
-                        console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): all sectors pre-loaded, entry $${coldStart.toString(16).toUpperCase()} (X=$${dosBase.toString(16).toUpperCase()})`);
+                        console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): F-BASIC IPL, entry $${coldStart.toString(16).toUpperCase()} (X=$${dosBase.toString(16).toUpperCase()})`);
                         return coldStart;
                     }
-                    console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): sectors loaded, entry $0100`);
+                    console.log(`[BOOT] FM-7 NEW BOOT (${flexIPL ? 'FLEX' : 'Direct IPL'}): standalone IPL, entry $0100`);
                     return 0x0100;
                 }
             }

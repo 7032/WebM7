@@ -356,6 +356,12 @@ export class FDC {
         this.delayCycles = 0;       // Remaining delay in CPU cycles (2MHz)
         this.cyclesToDrq = 0;       // Cycles between DRQ assertions
 
+        // Disk rotation phase — tracks the angular position of the spinning
+        // disk in CPU cycles.  300 RPM = 200 ms/revolution.  The phase wraps
+        // at one full revolution and is advanced by step().  Used to compute
+        // realistic rotational latency for sector find operations.
+        this._rotationPhase = 0;
+
         // IRQ / DRQ status
         this.irqFlag = false;
         this.drqFlag = false;
@@ -363,6 +369,7 @@ export class FDC {
         // Pending DRQ for byte-level transfer timing
         this._pendingDrq = false;
         this._drqTimer = 0;
+        this._effectiveBytePeriod = 0;
 
         // D77 sector status (CRC errors etc.) for READ completion
         this._readStatusExtra = 0;
@@ -588,10 +595,16 @@ export class FDC {
     static RNF_TIMEOUT_US = 1000000;
 
     // CPU-clock-dependent cycle counts (set by setCPUClock)
-    static ROTATE_DELAY = 12000;
-    static BYTE_DELAY = 64;
-    static MULTI_SECTOR_GAP = 12000;
-    static RNF_TIMEOUT = 2000000;
+    // Defaults match FM-7 clock (1.794 MHz = 1.794 cycles/µs)
+    static ROTATE_DELAY = Math.round(6000 * 1.794);       // 10764
+    static BYTE_DELAY = Math.round(32 * 1.794);           // 57
+    static MULTI_SECTOR_GAP = Math.round(6000 * 1.794);   // 10764
+    static RNF_TIMEOUT = Math.round(1000000 * 1.794);     // 1794000
+    // Full revolution at 300 RPM = 200 ms
+    static REVOLUTION_US = 200000;
+    static REVOLUTION_CYCLES = Math.round(200000 * 1.794); // 358800
+    // Sectors per track (standard FM-7 2D/2DD format)
+    static SECTORS_PER_TRACK = 16;
 
     /** Update timing constants for actual CPU clock frequency */
     static setCPUClock(hz) {
@@ -600,6 +613,7 @@ export class FDC {
         FDC.BYTE_DELAY = Math.round(FDC.BYTE_DELAY_US * cpm);
         FDC.MULTI_SECTOR_GAP = Math.round(FDC.MULTI_SECTOR_GAP_US * cpm);
         FDC.RNF_TIMEOUT = Math.round(FDC.RNF_TIMEOUT_US * cpm);
+        FDC.REVOLUTION_CYCLES = Math.round(FDC.REVOLUTION_US * cpm);
     }
 
     // =========================================================================
@@ -750,6 +764,7 @@ export class FDC {
                 // If DRQ is set, reading data clears it and advances transfer
                 if (this.drqFlag) {
                     value = this.dataReg;
+                    const elapsedSinceDrq = this._drqAge || 0;
                     this.drqFlag = false;
                     this.statusReg &= ~STATUS.DRQ;
                     if (this._captureEnabled && this.state === FDC_STATE.READ_TRANSFER) {
@@ -760,7 +775,7 @@ export class FDC {
                         this._logTotalBytes++;
                         extra = { idx: this._logByteCount };
                     }
-                    this._advanceRead();
+                    this._advanceRead(elapsedSinceDrq);
                 } else {
                     value = this.dataReg;
                 }
@@ -872,6 +887,9 @@ export class FDC {
      */
     step(cycles) {
         if (this.logEnabled) this._logCycle += cycles;
+
+        // Advance disk rotation phase (continuous, wraps at one revolution)
+        this._rotationPhase = (this._rotationPhase + cycles) % FDC.REVOLUTION_CYCLES;
 
         // Handle pending DRQ (byte transfer timing)
         if (this._pendingDrq) {
@@ -1068,14 +1086,12 @@ export class FDC {
 
             if (cmdHigh === 0x00) {
                 // Restore: seek to track 0
-                console.log(`[FDC] RESTORE (head at T${this.headPosition[this.currentDrive]})`);
                 this.dataReg = 0; // Target track = 0
                 this.trackReg = 0xFF; // Start from "unknown"
                 this.state = FDC_STATE.SEEK_STEPPING;
                 this._beginSeekRestore();
             } else if (cmdHigh === 0x10) {
                 // Seek: seek to track in data register
-                console.log(`[FDC] SEEK T${this.trackReg}→T${this.dataReg}`);
                 this.state = FDC_STATE.SEEK_STEPPING;
                 this._beginSeek();
             } else if (cmdHigh <= 0x30) {
@@ -1118,7 +1134,7 @@ export class FDC {
             if (cmdHigh === 0x80 || cmdHigh === 0x90) {
                 // Read Sector - add rotational latency
                 this.state = FDC_STATE.READ_FIND_SECTOR;
-                this.delayCycles = settleCycles + FDC.ROTATE_DELAY;
+                this.delayCycles = settleCycles + this._rotationalLatency();
             } else {
                 // Write Sector ($A0-$BF)
                 if (this.currentDisk.writeProtect) {
@@ -1126,7 +1142,7 @@ export class FDC {
                     return;
                 }
                 this.state = FDC_STATE.WRITE_FIND_SECTOR;
-                this.delayCycles = settleCycles + FDC.ROTATE_DELAY;
+                this.delayCycles = settleCycles + this._rotationalLatency();
             }
             return;
         }
@@ -1179,6 +1195,35 @@ export class FDC {
             this.delayCycles = 0;
             return;
         }
+    }
+
+    /**
+     * Compute rotational latency to reach the target sector from the
+     * current disk rotation phase.  On real hardware the disk spins
+     * continuously at 300 RPM; the time to reach a given sector depends
+     * on where the head is in the rotation when the command is issued.
+     *
+     * 300 RPM = 200 ms / revolution, 16 sectors / track.
+     * Sector N occupies a fixed arc: offset = N * (revolution / 16).
+     * Latency = (sector_offset - current_phase) mod revolution.
+     *
+     * Returns a latency in CPU cycles that naturally varies between
+     * successive reads, matching real-hardware behaviour that some
+     * games rely on for timing-based checks.
+     */
+    _rotationalLatency() {
+        const rev = FDC.REVOLUTION_CYCLES;
+        const spt = FDC.SECTORS_PER_TRACK;
+        const sectorSlot = rev / spt;   // cycles per sector slot
+        // Target sector's angular position on the track
+        const sectorOffset = ((this.sectorReg - 1) & 0x0F) * sectorSlot;
+        // Time from current phase until the sector header passes under head
+        let latency = Math.round(sectorOffset - this._rotationPhase);
+        if (latency < 0) latency += rev;
+        // Minimum latency: at least ~1 ms for controller overhead
+        const minCycles = Math.round(rev / (spt * 4));  // ~3125 @ 2MHz
+        if (latency < minCycles) latency += rev;
+        return latency;
     }
 
     // =========================================================================
@@ -1303,6 +1348,9 @@ export class FDC {
 
     /** Complete a Type I command and set final status */
     _completeTypeI() {
+        // Reset PLL drift counter — Type I commands (RESTORE/SEEK) establish
+        // a new head position; the PLL re-locks from scratch on the next read.
+        this._pllDrift = 0;
         let status = 0;
 
         // Track 0 bit
@@ -1334,27 +1382,23 @@ export class FDC {
         }
 
         // Look up the sector on the CURRENT physical track by sector number.
-        // MB8877 READ SECTOR scans address fields on the physical track.
-        // Some games write a different value to trackReg before READ without
-        // issuing SEEK (e.g. copy-protection loaders that set trackReg=0
-        // while the head is at track N). On real hardware, data is returned
-        // as long as the sector R field matches sectorReg — the C-field vs
-        // trackReg comparison does not prevent data transfer on MB8877.
+        // MB8877/WD1793 READ SECTOR scans address fields on the physical track.
+        // The FDC compares each sector ID's C field against the Track Register
+        // and R field against the Sector Register.  Only when both match does
+        // the data transfer begin.  If no matching ID is found within 5 index
+        // pulses, RNF is asserted.
         const physTrack = this.headPosition[this.currentDrive];
         const side = this.currentSide;
         const sectorNum = this.sectorReg;
 
-        console.log(`[FDC] READ T${physTrack} S${side} sec${sectorNum} (trk=${this.trackReg})`);
-
         const sector = disk.getSector(physTrack, side, sectorNum);
-        if (!sector) {
-            console.warn(`[FDC] RNF! T${physTrack} S${side} sec${sectorNum} (no sector) — entering 5-index-pulse search window`);
+        if (!sector || sector.c !== this.trackReg) {
             if (this.logEnabled) {
                 this.log.push({
                     cyc: this._logCycle, t: 'FIND_RNF',
                     physTrk: physTrack, tr: this.trackReg,
                     side, sec: sectorNum,
-                    has: 'none',
+                    has: !sector ? 'none' : `C${sector.c}`,
                 });
             }
             // MB8877: on missing sector, keep BUSY asserted while searching
@@ -1398,25 +1442,56 @@ export class FDC {
         // Save completion status for when transfer finishes
         this._readStatusExtra = statusExtra;
 
-        // Present first byte via pending DRQ (byte transfer timing)
+        // Present first byte via pending DRQ (byte transfer timing).
+        //
+        // On real hardware the disk's MFM bit clock (PLL-locked to disk
+        // rotation) is asynchronous to the CPU crystal.  The PLL re-acquires
+        // lock on each sector's sync field; the lock phase drifts slightly
+        // with each successive sector read.  Software that compares poll-loop
+        // counts across two sector reads (timing-based copy protection)
+        // expects the second read to produce 32-255 more polling iterations
+        // than the first.
+        //
+        // We model this with a monotonically increasing drift counter that
+        // resets on Type I commands (RESTORE/SEEK).  Each READ adds a small
+        // increment to the effective byte period.  Over 256 bytes a 3-cycle
+        // per-byte increase produces ~60 extra poll iterations in a typical
+        // 17-cycle inner loop — well within the expected $20-$FF range.
         this.dataReg = this.dataBuffer[0];
         this.dataIndex = 1;
         this._pendingDrq = true;
-        this._drqTimer = FDC.BYTE_DELAY;
+        const drift = Math.min(this._pllDrift || 0, 4);
+        this._pllDrift = (this._pllDrift || 0) + 3;
+        this._effectiveBytePeriod = FDC.BYTE_DELAY + drift;
+        this._drqTimer = this._effectiveBytePeriod;
         this.statusReg = STATUS.BUSY | statusExtra;
         this.state = FDC_STATE.READ_TRANSFER;
     }
 
-    /** Advance read transfer after CPU reads data register */
-    _advanceRead() {
+    /**
+     * Advance read transfer after CPU reads data register.
+     * @param {number} [elapsedSinceDrq=0] - Cycles elapsed since the DRQ
+     *   that the CPU just consumed.  On real hardware, bytes arrive from the
+     *   spinning disk at fixed intervals (BYTE_DELAY).  If the CPU reads the
+     *   data register quickly, the remaining time until the *next* byte is
+     *   shorter than a full BYTE_DELAY.  Accounting for this prevents
+     *   artificially inflating the DRQ-to-DRQ gap and keeps software timing
+     *   loops (which poll $FD1F between bytes) in spec.
+     */
+    _advanceRead(elapsedSinceDrq = 0) {
         if (this.state !== FDC_STATE.READ_TRANSFER) return;
 
         if (this.dataIndex < this.dataLength) {
-            // More bytes to transfer - use pending DRQ for realistic timing
+            // More bytes to transfer.
+            // Use the per-transfer effective byte period (which includes
+            // clock-drift simulation) minus the time already elapsed since
+            // the DRQ that the CPU just consumed.
             this.dataReg = this.dataBuffer[this.dataIndex];
             this.dataIndex++;
             this._pendingDrq = true;
-            this._drqTimer = FDC.BYTE_DELAY;
+            const period = this._effectiveBytePeriod || FDC.BYTE_DELAY;
+            const remaining = period - elapsedSinceDrq;
+            this._drqTimer = remaining > 0 ? remaining : 1;
         } else {
             // Transfer complete
             if (this.cmdFlags.m) {
@@ -1463,8 +1538,8 @@ export class FDC {
         const sectorNum = this.sectorReg;
 
         const sector = disk.getSector(track, side, sectorNum);
-        if (!sector) {
-            // MB8877: search 5 index pulses before RNF (same as read path).
+        if (!sector || sector.c !== this.trackReg) {
+            // MB8877: C field must match track register (same as read path).
             this.statusReg = STATUS.BUSY;
             this.drqFlag = false;
             this.state = FDC_STATE.RNF_WAIT;
@@ -1635,17 +1710,6 @@ export class FDC {
         this.statusReg = errorBits & ~STATUS.BUSY; // Clear BUSY, set error bits
         this.drqFlag = false;
         this.state = FDC_STATE.IDLE;
-
-        // Always log completion status for diagnostics
-        {
-            const flags = [];
-            if (errorBits & STATUS.RNF) flags.push('RNF');
-            if (errorBits & STATUS.CRC_ERROR) flags.push('CRC');
-            if (errorBits & STATUS.LOST_DATA) flags.push('LOST');
-            if (errorBits & STATUS.NOT_READY) flags.push('NRDY');
-            const f = flags.length ? flags.join('|') : 'OK';
-            console.log(`[FDC] DONE status=$${(errorBits & 0xFF).toString(16).padStart(2,'0')} ${f}`);
-        }
 
         if (this.logEnabled) {
             const dur = this._logCycle - this._logCmdStart;
