@@ -371,6 +371,17 @@ export class Keyboard {
     keyDown(event) {
         const code = event.code;
 
+        // 101 US keyboard shortcut: Ctrl+[ → @, Ctrl+/ → _
+        // These characters have no dedicated key on US layouts.
+        const ctrlAlt = this._matchCtrlShortcut(event, code);
+        if (ctrlAlt !== FM7_KEY_NONE) {
+            event.preventDefault();
+            this._heldKeys.add(code);
+            const mask = this._useScanCodes ? 0x7F : 0xFF;
+            this._pushKey(ctrlAlt & mask);
+            return;
+        }
+
         // Toggle LED keys (handle before mapping to prevent browser default)
         if (code === 'CapsLock') {
             this.capsLock = !this.capsLock;
@@ -417,6 +428,16 @@ export class Keyboard {
         if (!this._heldKeys.has(code)) return;
         this._heldKeys.delete(code);
 
+        // Ctrl+[ / Ctrl+/ shortcut: emit break code for @ / _
+        const ctrlAlt = this._matchCtrlShortcut(event, code);
+        if (ctrlAlt !== FM7_KEY_NONE) {
+            event.preventDefault();
+            if (this._enableBreakCodes) {
+                this._pushKey((ctrlAlt & 0x7F) | FM7_KEY_BREAK);
+            }
+            return;
+        }
+
         // Check remapped code for preventDefault
         const remapped = this._customMap.get(code) || code;
         const tbl = this._useScanCodes ? CODE_TO_FM7_SCAN : CODE_TO_FM7_ASCII;
@@ -431,6 +452,26 @@ export class Keyboard {
                 this._pushKey((fm7Code & 0x7F) | FM7_KEY_BREAK);
             }
         }
+    }
+
+    /**
+     * Match Ctrl+[ / Ctrl+/ shortcuts for US keyboards that lack @ and _ keys.
+     * Returns FM-7 key code (ASCII or scan code depending on mode), or
+     * FM7_KEY_NONE if the event is not one of these shortcuts.
+     *
+     * @param {KeyboardEvent} event
+     * @param {string} code
+     * @returns {number}
+     */
+    _matchCtrlShortcut(event, code) {
+        if (!event.ctrlKey) return FM7_KEY_NONE;
+        if (code === 'BracketLeft') {
+            return this._useScanCodes ? 0x1B : 0x40;  // @
+        }
+        if (code === 'Slash') {
+            return this._useScanCodes ? 0x34 : 0x5F;  // _
+        }
+        return FM7_KEY_NONE;
     }
 
     // ------------------------------------------------------------------

@@ -1,6 +1,6 @@
-// FM-7 / FM77AV Display System for Web Emulator
-// Handles VRAM (3 bitplanes), TTL/analog palette, sub CPU memory, and canvas rendering.
-// Includes full FM77AV ALU (MB61VH010/011) and hardware line drawing engine,
+// FM-7 / FM77AV / FM77AV40 Display System for Web Emulator
+// Handles VRAM (3 bitplanes, up to 3 pages), TTL/analog palette, sub CPU memory, and canvas rendering.
+// Includes full FM77AV ALU (MB61VH010/011), hardware line drawing engine, and 262,144-color mode.
 
 //
 // Sub CPU memory map:
@@ -32,6 +32,11 @@ const BYTES_PER_LINE_320 = 40;  // 320 / 8 (analog 320x200 mode)
 // FM77AV display modes
 const DISPLAY_MODE_640  = 0;  // 640x200, 8 colors (FM-7 compatible)
 const DISPLAY_MODE_320  = 1;  // 320x200, 4096 colors (FM77AV)
+const DISPLAY_MODE_262K = 2;  // 320x200, 262,144 colors (FM77AV40)
+const DISPLAY_MODE_400  = 3;  // 640x400, 8 colors (FM77AV40)
+
+const SCREEN_HEIGHT_400 = 400;
+const PLANE_SIZE_400    = 0x8000;  // 32KB per plane in 400-line mode
 
 // Physical RGB colors for TTL 8-color mode (GRB bit order)
 // Index = (G << 2) | (R << 1) | B
@@ -66,8 +71,12 @@ export class Display {
         this._vramBuf1 = new ArrayBuffer(VRAM_SIZE);
         this.vramPage1 = new Uint8Array(this._vramBuf1);
 
-        // Temporary buffer for VRAM scroll rotation (max plane size)
-        this._scrollBuf = new Uint8Array(PLANE_SIZE);
+        // VRAM page 2: 3 bitplanes, 48KB total (FM77AV40 only)
+        this._vramBuf2 = new ArrayBuffer(VRAM_SIZE);
+        this.vramPage2 = new Uint8Array(this._vramBuf2);
+
+        // Temporary buffer for VRAM scroll rotation (32KB for 400-line planes)
+        this._scrollBuf = new Uint8Array(PLANE_SIZE_400);
 
         // Sub CPU work RAM: $C000-$D37F (5KB) + $D500-$D7FF (768 bytes, FM77AV only)
         this._workBuf = new ArrayBuffer(0x1680);  // 0x1380 + 0x0300
@@ -98,6 +107,7 @@ export class Display {
         this.activeVramPage = 0;    // Sub CPU writes to this page (0 or 1)
         this.displayVramPage = 0;   // Renderer reads from this page (0 or 1)
         this.displayMode = DISPLAY_MODE_640;  // 640x200 or 320x200
+        this._mode320Flag = false;  // Tracks $FD12 bit6 independently from displayMode
 
         // Diagnostic ring buffer for scroll register / display state events.
         // Tags: D40E, D40F, SCROLL, APG, DPG, MODE, D430, PAL_B/R/G, FD37
@@ -113,6 +123,12 @@ export class Display {
 
         // FM77AV mode flag - set by fm7.js when machine type is FM77AV
         this.isAV = false;
+
+        // FM77AV40 mode flag
+        this.isAV40 = false;
+
+        // FM77AV40: VRAM bank select ($D42F) for 262,144-color / 400-line mode
+        this.subramVramBank = 0;  // 0-2 (bank 3 does not exist)
 
         // Multi-page register: bit mask controlling which planes are active
         // bit 0 = blue (plane 0), bit 1 = red (plane 1), bit 2 = green (plane 2)
@@ -159,8 +175,8 @@ export class Display {
         this.crtOn = false;
         this.vramaFlag = false;
 
-        // Dirty tracking
-        this._dirtyBands = new Uint8Array(25);
+        // Dirty tracking (50 bands = 400 lines / 8; 200-line modes use first 25)
+        this._dirtyBands = new Uint8Array(50);
         this._fullDirty = true;
 
         // VSync frame counter
@@ -190,6 +206,12 @@ export class Display {
 
     /** Get the VRAM array for the active (write) page */
     _getActiveVram() {
+        // In 262K / 400-line mode, subramVramBank selects among 3 banks
+        if (this.displayMode === DISPLAY_MODE_262K || this.displayMode === DISPLAY_MODE_400) {
+            if (this.subramVramBank === 2) return this.vramPage2;
+            if (this.subramVramBank === 1) return this.vramPage1;
+            return this.vram;
+        }
         return this.activeVramPage === 0 ? this.vram : this.vramPage1;
     }
 
@@ -215,6 +237,10 @@ export class Display {
         if (this.multiPage & (1 << plane)) {
             return 0xFF;
         }
+        if (this.displayMode === DISPLAY_MODE_400) {
+            const pages = [this.vram, this.vramPage1, this.vramPage2];
+            return pages[plane][offset & (PLANE_SIZE_400 - 1)];
+        }
         const vram = this._getActiveVram();
         // ALU accesses use raw offset (no scroll offset applied)
         return vram[plane * PLANE_SIZE + (offset & (PLANE_SIZE - 1))];
@@ -229,6 +255,19 @@ export class Display {
      */
     _aluWritePlane(offset, plane, dat) {
         if (this.multiPage & (1 << plane)) {
+            return;
+        }
+        if (this.displayMode === DISPLAY_MODE_400) {
+            const pages = [this.vram, this.vramPage1, this.vramPage2];
+            const vram = pages[plane];
+            const rawOffset = offset & (PLANE_SIZE_400 - 1);
+            if (vram[rawOffset] !== dat) {
+                vram[rawOffset] = dat;
+                const line = (rawOffset / BYTES_PER_LINE) | 0;
+                if (line < SCREEN_HEIGHT_400) {
+                    this._dirtyBands[(line >> 3)] = 1;
+                }
+            }
             return;
         }
         const vram = this._getActiveVram();
@@ -289,8 +328,6 @@ export class Display {
      * Masked bits are preserved from original VRAM data.
      */
     _aluPset(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         // If compare-write mode, run compare first
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
@@ -320,8 +357,6 @@ export class Display {
      * Effectively clears unmasked bits while keeping masked bits.
      */
     _aluProhibit(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -341,8 +376,6 @@ export class Display {
      * ALU OR operation: OR color with existing VRAM data.
      */
     _aluOr(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -365,8 +398,6 @@ export class Display {
      * ALU AND operation: AND color with existing VRAM data.
      */
     _aluAnd(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -388,8 +419,6 @@ export class Display {
      * ALU XOR operation: XOR color with existing VRAM data.
      */
     _aluXor(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -411,8 +440,6 @@ export class Display {
      * ALU NOT operation: invert existing VRAM data.
      */
     _aluNot(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -434,8 +461,6 @@ export class Display {
      * Each plane gets its own tile byte from aluTileDat[plane].
      */
     _aluTile(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         if (this.aluCommand & 0x40) {
             this._aluCompare(addr);
         }
@@ -461,8 +486,6 @@ export class Display {
      * Result bits are set in aluCmpStat.
      */
     _aluCompare(addr) {
-        addr &= (PLANE_SIZE - 1);
-
         // Read all three planes
         const b = this._aluReadPlane(addr, 0);
         const r = this._aluReadPlane(addr, 1);
@@ -545,6 +568,7 @@ export class Display {
      * Dispatch to the correct ALU operation based on command bits 2-0.
      */
     _dispatchAluOp(addr) {
+        addr &= (this.displayMode === DISPLAY_MODE_400) ? (PLANE_SIZE_400 - 1) : (PLANE_SIZE - 1);
         switch (this.aluCommand & 0x07) {
             case ALU_PSET:     this._aluPset(addr);     break;
             case ALU_PROHIBIT: this._aluProhibit(addr); break;
@@ -585,7 +609,8 @@ export class Display {
         }
 
         // Add line offset
-        addr = (addr + this.lineOffset) & (PLANE_SIZE - 1);
+        const planeMask = (this.displayMode === DISPLAY_MODE_400) ? (PLANE_SIZE_400 - 1) : (PLANE_SIZE - 1);
+        addr = (addr + this.lineOffset) & planeMask;
 
         // If address changed from previous pixel, flush the ALU for the old address
         if (this._lineAddrOld !== addr) {
@@ -711,14 +736,21 @@ export class Display {
         addr &= 0xFFFF;
         if (addr >= VRAM_SIZE) return 0xFF;
 
+        // 400-line mode: entire $0000-$BFFF maps to one bank-selected plane
+        if (this.displayMode === DISPLAY_MODE_400) {
+            if (this.isAV && (this.aluCommand & 0x80)) {
+                this._dispatchAluOp(addr);
+            }
+            if (this.isAV && (this.multiPage & (1 << this.subramVramBank))) {
+                return 0xFF;
+            }
+            return this._getActiveVram()[addr];
+        }
+
         const plane = (addr / PLANE_SIZE) | 0;
         const rawOffset = addr % PLANE_SIZE;
 
         // FM77AV: ALU intercept on read
-        // On the real MB61VH010, VRAM reads with ALU enabled trigger the
-        // full ALU operation (same as writes). This is used by programs to
-        // erase graphics: set ALU to PSET with color 0, then READ VRAM
-        // at the target address — the ALU writes black to all planes.
         if (this.isAV && (this.aluCommand & 0x80)) {
             this._dispatchAluOp(rawOffset);
         }
@@ -734,6 +766,24 @@ export class Display {
     writeVRAM(addr, value) {
         addr &= 0xFFFF;
         if (addr >= VRAM_SIZE) return;
+
+        // 400-line mode: entire $0000-$BFFF maps to one bank-selected plane
+        if (this.displayMode === DISPLAY_MODE_400) {
+            if (this.isAV && (this.aluCommand & 0x80)) {
+                this._dispatchAluOp(addr);
+                return;
+            }
+            if (this.multiPage & (1 << this.subramVramBank)) return;
+            const vram = this._getActiveVram();
+            if (vram[addr] !== value) {
+                vram[addr] = value;
+                const line = (addr / BYTES_PER_LINE) | 0;
+                if (line < SCREEN_HEIGHT_400) {
+                    this._dirtyBands[(line >> 3)] = 1;
+                }
+            }
+            return;
+        }
 
         const plane = (addr / PLANE_SIZE) | 0;
         const rawOffset = addr % PLANE_SIZE;
@@ -862,6 +912,11 @@ export class Display {
             }
         }
 
+        // FM77AV40: $D42F — VRAM bank select (read)
+        if (addr === 0xD42F && this.isAV40) {
+            return { value: 0xFC | (this.subramVramBank & 3) };
+        }
+
         return { value: 0xFF };
     }
 
@@ -979,6 +1034,15 @@ export class Display {
                 return {};
             }
 
+            return {};
+        }
+
+        // FM77AV40: $D42F — VRAM bank select (write)
+        if (addr === 0xD42F && this.isAV40) {
+            const bank = value & 0x03;
+            if (bank < 3) {
+                this.subramVramBank = bank;
+            }
             return {};
         }
 
@@ -1103,8 +1167,22 @@ export class Display {
     _vramScroll(offset) {
         this._pushScrollTrace('SCROLL', { diff: offset & 0xFFFF });
 
-        const vram = this._getActiveVram();
         const buf = this._scrollBuf;
+
+        if (this.displayMode === DISPLAY_MODE_400) {
+            // 400-line: 3 separate 32KB planes, scroll each
+            offset = (offset & 0x3FFF) << 1;
+            if (offset === 0) return;
+            for (const page of [this.vram, this.vramPage1, this.vramPage2]) {
+                buf.set(page.subarray(0, offset));
+                page.copyWithin(0, offset, PLANE_SIZE_400);
+                page.set(buf.subarray(0, offset), PLANE_SIZE_400 - offset);
+            }
+            this._fullDirty = true;
+            return;
+        }
+
+        const vram = this._getActiveVram();
 
         if (this.displayMode === DISPLAY_MODE_320) {
             // 320x200 analog: 6 sub-planes of 0x2000 each
@@ -1163,6 +1241,7 @@ export class Display {
         if (this.displayMode !== mode) {
             this.displayMode = mode;
             this._fullDirty = true;
+            this._canvas = null;  // Force canvas re-init for dimension change
             this._pushScrollTrace('MODE');
         }
     }
@@ -1204,6 +1283,12 @@ export class Display {
         if (!this.crtOn) {
             return this._renderBlank(canvas);
         }
+        if (this.displayMode === DISPLAY_MODE_400) {
+            return this._render640x400(canvas, force);
+        }
+        if (this.displayMode === DISPLAY_MODE_262K) {
+            return this._render320x200_262k(canvas, force);
+        }
         if (this.displayMode === DISPLAY_MODE_320) {
             return this._render320x200(canvas, force);
         }
@@ -1211,12 +1296,13 @@ export class Display {
     }
 
     _renderBlank(canvas) {
+        const h = (this.displayMode === DISPLAY_MODE_400) ? SCREEN_HEIGHT_400 : SCREEN_HEIGHT;
         if (this._canvas !== canvas || !this._ctx) {
             this._canvas = canvas;
             canvas.width = SCREEN_WIDTH;
-            canvas.height = SCREEN_HEIGHT;
+            canvas.height = h;
             this._ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: false });
-            this._imageData = this._ctx.createImageData(SCREEN_WIDTH, SCREEN_HEIGHT);
+            this._imageData = this._ctx.createImageData(SCREEN_WIDTH, h);
             this._pixelBuf = new Uint32Array(this._imageData.data.buffer);
         }
         if (this._lastBlank) return;
@@ -1388,9 +1474,157 @@ export class Display {
         this._dirtyBands.fill(0);
     }
 
+    _render320x200_262k(canvas, force = false) {
+        if (this._canvas !== canvas || !this._ctx) {
+            this._canvas = canvas;
+            canvas.width = SCREEN_WIDTH;
+            canvas.height = SCREEN_HEIGHT;
+            this._ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: false });
+            this._imageData = this._ctx.createImageData(SCREEN_WIDTH, SCREEN_HEIGHT);
+            this._pixelBuf = new Uint32Array(this._imageData.data.buffer);
+            this._fullDirty = true;
+        }
+
+        const pixels = this._pixelBuf;
+        const page0 = this.vram;
+        const page1 = this.vramPage1;
+        const page2 = this.vramPage2;
+
+        // 262,144-color mode: 18 sub-planes (6 per channel), 320x200
+        // Each channel has 6 bits -> 64 levels, mapped to 0-255 via LUT
+        // Sub-plane layout per page (each sub-plane = 0x2000 bytes):
+        //   page0: B5,B4 (Blue[0x0000]), R5,R4 (Red[0x4000]), G5,G4 (Green[0x8000])
+        //   page1: B3,B2 (Blue[0x0000]), R3,R2 (Red[0x4000]), G3,G2 (Green[0x8000])
+        //   page2: B1,B0 (Blue[0x0000]), R1,R0 (Red[0x4000]), G1,G0 (Green[0x8000])
+
+        for (let y = 0; y < SCREEN_HEIGHT; y++) {
+            const lineOfs = y * BYTES_PER_LINE_320;
+            const pixelRow = y * SCREEN_WIDTH;
+
+            for (let byteX = 0; byteX < BYTES_PER_LINE_320; byteX++) {
+                const ofs = lineOfs + byteX;
+
+                // Read 18 sub-plane bytes (6 per channel, 2 per page)
+                const b5 = page0[0x0000 + ofs], b4 = page0[0x2000 + ofs];
+                const b3 = page1[0x0000 + ofs], b2 = page1[0x2000 + ofs];
+                const b1 = page2[0x0000 + ofs], b0 = page2[0x2000 + ofs];
+
+                const r5 = page0[0x4000 + ofs], r4 = page0[0x6000 + ofs];
+                const r3 = page1[0x4000 + ofs], r2 = page1[0x6000 + ofs];
+                const r1 = page2[0x4000 + ofs], r0 = page2[0x6000 + ofs];
+
+                const g5 = page0[0x8000 + ofs], g4 = page0[0xA000 + ofs];
+                const g3 = page1[0x8000 + ofs], g2 = page1[0xA000 + ofs];
+                const g1 = page2[0x8000 + ofs], g0 = page2[0xA000 + ofs];
+
+                for (let bit = 7; bit >= 0; bit--) {
+                    // 6-bit value per channel (bit 5 = MSB from page0 sub0)
+                    const rv = (((r5 >> bit) & 1) << 5) | (((r4 >> bit) & 1) << 4) |
+                               (((r3 >> bit) & 1) << 3) | (((r2 >> bit) & 1) << 2) |
+                               (((r1 >> bit) & 1) << 1) |  ((r0 >> bit) & 1);
+                    const gv = (((g5 >> bit) & 1) << 5) | (((g4 >> bit) & 1) << 4) |
+                               (((g3 >> bit) & 1) << 3) | (((g2 >> bit) & 1) << 2) |
+                               (((g1 >> bit) & 1) << 1) |  ((g0 >> bit) & 1);
+                    const bv = (((b5 >> bit) & 1) << 5) | (((b4 >> bit) & 1) << 4) |
+                               (((b3 >> bit) & 1) << 3) | (((b2 >> bit) & 1) << 2) |
+                               (((b1 >> bit) & 1) << 1) |  ((b0 >> bit) & 1);
+
+                    // 6-bit to 8-bit: (val << 2) | (val >> 4) gives uniform 0-255
+                    const r8 = (rv << 2) | (rv >> 4);
+                    const g8 = (gv << 2) | (gv >> 4);
+                    const b8 = (bv << 2) | (bv >> 4);
+
+                    // ABGR for little-endian Uint32Array
+                    const color = 0xFF000000 | (b8 << 16) | (g8 << 8) | r8;
+                    const destX = pixelRow + (byteX * 16) + ((7 - bit) * 2);
+                    pixels[destX]     = color;
+                    pixels[destX + 1] = color;
+                }
+            }
+        }
+
+        this._ctx.putImageData(this._imageData, 0, 0);
+        this._fullDirty = false;
+        this._dirtyBands.fill(0);
+    }
+
+    _render640x400(canvas, force = false) {
+        if (this._canvas !== canvas || !this._ctx) {
+            this._canvas = canvas;
+            canvas.width = SCREEN_WIDTH;
+            canvas.height = SCREEN_HEIGHT_400;
+            this._ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: false });
+            this._imageData = this._ctx.createImageData(SCREEN_WIDTH, SCREEN_HEIGHT_400);
+            this._pixelBuf = new Uint32Array(this._imageData.data.buffer);
+            this._fullDirty = true;
+        }
+
+        const needFull = this._fullDirty || force;
+
+        if (!needFull) {
+            let anyDirty = false;
+            for (let b = 0; b < 50; b++) {
+                if (this._dirtyBands[b]) { anyDirty = true; break; }
+            }
+            if (!anyDirty) return;
+        }
+
+        const pixels = this._pixelBuf;
+        // 400-line: 3 planes in separate VRAM pages, 32KB each
+        const blue  = this.vram;
+        const red   = this.vramPage1;
+        const green = this.vramPage2;
+        const pal   = this._resolvedPalette;
+
+        for (let band = 0; band < 50; band++) {
+            if (!needFull && !this._dirtyBands[band]) continue;
+
+            const yStart = band << 3;
+            const yEnd = Math.min(yStart + 8, SCREEN_HEIGHT_400);
+
+            for (let y = yStart; y < yEnd; y++) {
+                const lineBase = y * BYTES_PER_LINE;
+                const pixelRow = y * SCREEN_WIDTH;
+
+                for (let byteX = 0; byteX < BYTES_PER_LINE; byteX++) {
+                    const byteAddr = lineBase + byteX;
+                    const bByte = (this.multiPage & 0x10) ? 0 : blue [byteAddr];
+                    const rByte = (this.multiPage & 0x20) ? 0 : red  [byteAddr];
+                    const gByte = (this.multiPage & 0x40) ? 0 : green[byteAddr];
+                    const px = pixelRow + (byteX << 3);
+
+                    pixels[px    ] = pal[((gByte >> 7) & 1) << 2 | ((rByte >> 7) & 1) << 1 | ((bByte >> 7) & 1)];
+                    pixels[px + 1] = pal[((gByte >> 6) & 1) << 2 | ((rByte >> 6) & 1) << 1 | ((bByte >> 6) & 1)];
+                    pixels[px + 2] = pal[((gByte >> 5) & 1) << 2 | ((rByte >> 5) & 1) << 1 | ((bByte >> 5) & 1)];
+                    pixels[px + 3] = pal[((gByte >> 4) & 1) << 2 | ((rByte >> 4) & 1) << 1 | ((bByte >> 4) & 1)];
+                    pixels[px + 4] = pal[((gByte >> 3) & 1) << 2 | ((rByte >> 3) & 1) << 1 | ((bByte >> 3) & 1)];
+                    pixels[px + 5] = pal[((gByte >> 2) & 1) << 2 | ((rByte >> 2) & 1) << 1 | ((bByte >> 2) & 1)];
+                    pixels[px + 6] = pal[((gByte >> 1) & 1) << 2 | ((rByte >> 1) & 1) << 1 | ((bByte >> 1) & 1)];
+                    pixels[px + 7] = pal[( gByte       & 1) << 2 | ( rByte       & 1) << 1 | ( bByte       & 1)];
+                }
+            }
+        }
+
+        if (needFull) {
+            this._ctx.putImageData(this._imageData, 0, 0);
+        } else {
+            for (let band = 0; band < 50; band++) {
+                if (!this._dirtyBands[band]) continue;
+                const yStart = band << 3;
+                const h = Math.min(8, SCREEN_HEIGHT_400 - yStart);
+                this._ctx.putImageData(this._imageData, 0, 0,
+                    0, yStart, SCREEN_WIDTH, h);
+            }
+        }
+
+        this._fullDirty = false;
+        this._dirtyBands.fill(0);
+    }
+
     renderDoubled(canvas, force = false) {
-        if (!this._offscreenCanvas) {
-            this._offscreenCanvas = new OffscreenCanvas(SCREEN_WIDTH, SCREEN_HEIGHT);
+        const h = (this.displayMode === DISPLAY_MODE_400) ? SCREEN_HEIGHT_400 : SCREEN_HEIGHT;
+        if (!this._offscreenCanvas || this._offscreenCanvas.height !== h) {
+            this._offscreenCanvas = new OffscreenCanvas(SCREEN_WIDTH, h);
         }
         const savedCanvas = this._canvas;
         const savedCtx = this._ctx;
@@ -1406,10 +1640,10 @@ export class Display {
         this._pixelBuf = savedPixelBuf;
 
         canvas.width = SCREEN_WIDTH;
-        canvas.height = SCREEN_HEIGHT * 2;
+        canvas.height = h * 2;
         const ctx = canvas.getContext("2d", { alpha: false });
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(this._offscreenCanvas, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT * 2);
+        ctx.drawImage(this._offscreenCanvas, 0, 0, SCREEN_WIDTH, h * 2);
     }
 
     // ---------------------------------------------------------------
@@ -1428,6 +1662,7 @@ export class Display {
     clearVRAM() {
         this.vram.fill(0);
         this.vramPage1.fill(0);
+        this.vramPage2.fill(0);
         this._fullDirty = true;
     }
 
@@ -1479,7 +1714,9 @@ export class Display {
         this.activeVramPage = 0;
         this.displayVramPage = 0;
         this.displayMode = DISPLAY_MODE_640;
+        this._mode320Flag = false;
         this.multiPage = 0;
+        this.subramVramBank = 0;
 
         // Reset ALU and line drawing engine
         this.resetALU();

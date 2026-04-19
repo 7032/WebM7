@@ -1725,8 +1725,9 @@ export class CPU6809 {
             case 0xFF: { const a = this.addrExtended(); const v = this.opST16(this.s); this.write16(a, v); break; } // STS ext
 
             default:
-                // Illegal page 2 opcode
-                this.cycle = 2;
+                // Undefined page 2 opcode: real MC6809 executes the base
+                // page 1 instruction (the $10 prefix is simply consumed).
+                this._execPage1(opcode);
                 break;
         }
     }
@@ -1760,8 +1761,8 @@ export class CPU6809 {
             case 0xBC: { const a = this.addrExtended(); this.opCMP16(this.s, this.read16(a)); break; }       // CMPS ext
 
             default:
-                // Illegal page 3 opcode
-                this.cycle = 2;
+                // Undefined page 3 opcode: same as page 2 — execute base instruction
+                this._execPage1(opcode);
                 break;
         }
     }

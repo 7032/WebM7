@@ -19,3 +19,17 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Note on the FM sound engine (`js/opn.js`): The envelope, detune, attack-curve
+and related tables have been independently reconstructed from publicly
+available YM2203 data-sheet and OPN application-manual specifications, to
+the best of the author's knowledge, without incorporation of source code
+from other emulator projects.
+
+Note on the cassette tape format (`js/cmt.js`): The fixed 16-byte header
+string `XM7 TAPE IMAGE 0` is the format-level magic of the T77 file
+format and is required for interoperability with existing T77 tooling.
+Its presence in the source does not constitute a reference to, or a
+dependency on, any specific third-party emulator project.

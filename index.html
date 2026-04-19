@@ -21,7 +21,7 @@
         </div>
         <div class="toolbar">
             <div class="toolbar-group">
-                <button id="muteBtn" title="Mute/Unmute">VOL</button>
+                <button id="muteBtn" aria-label="Volume Mute / Unmute" title="Mute/Unmute">VOL</button>
                 <input type="range" id="volumeSlider" min="0" max="100" value="50">
                 <span class="vol-label" id="volLabel">50%</span>
             </div>
@@ -41,6 +41,7 @@
                     </div>
                 </div>
                 <span class="vol-label" id="tbKeyLabel">--</span>
+                <span class="vol-label" id="tbKbdMode" style="color:#8899aa;">ASCII</span>
                 <span class="vol-label" id="dispModeLabel">--</span>
                 <span class="vol-label" id="fpsLabel">--</span>
                 <button id="fullscreenBtn" title="Fullscreen (F11)">FULL</button>
@@ -49,7 +50,8 @@
         <div class="toolbar toolbar-debug">
             <div class="toolbar-group">
                 <span class="vol-label toolbar-debug-label">Debug Panels</span>
-                <button id="debugPanelBtn" title="CPU / State">CPU</button>
+                <button id="debugPanelBtn" title="CPU">CPU</button>
+                <button id="memPanelBtn" title="Memory">Memory</button>
                 <button id="keyPanelBtn" title="Keyboard">Keyboard</button>
                 <button id="palPanelBtn" title="Palette">Palette</button>
                 <button id="sndPanelBtn" title="PSG / FM">Sound</button>
@@ -73,17 +75,19 @@
                 </label>
                 <button id="pauseBtn" class="btn-stop" disabled>Pause</button>
                 <button id="resetBtn" class="btn-reset">Reset</button>
-                <button id="screenshotBtn" class="btn-screenshot" title="Save screenshot as PNG">📷</button>
+                <button id="screenshotBtn" class="btn-screenshot" aria-label="Take Screenshot" title="Save screenshot as PNG">📷</button>
             </div>
             <br/>
             <hr size="1">
             <br/>
             <div class="ctrl-row">
                 <label>Machine:</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="machineType" value="fm7" checked> FM-7</label>
-                    <label><input type="radio" name="machineType" value="fm77av"> FM77AV</label>
-                </div>
+                <select id="machineTypeSelect" style="font-size:11px;">
+                    <option value="fm7" selected>FM-7</option>
+                    <option value="fm77av">FM77AV</option>
+                    <option value="fm77av40">FM77AV40</option>
+                    <option value="fm77av40ex">FM77AV40EX</option>
+                </select>
             </div>
             <div class="ctrl-row">
                 <label>Boot Mode:</label>
@@ -94,7 +98,7 @@
                 </div>
             </div>
             <div class="ctrl-row" id="fmCardRow">
-                <label>FM Sound Card</label>
+                <label for="fmCardCheck">FM Sound Card</label>
                 <input type="checkbox" id="fmCardCheck">
             </div>
             <div class="ctrl-row">
@@ -105,7 +109,7 @@
                 </div>
             </div>
             <div class="ctrl-row">
-                <label>Cursor → Ten Key</label>
+                <label for="cursorToNumpad">Cursor → Ten Key</label>
                 <input type="checkbox" id="cursorToNumpad">
             </div>
         </div>
@@ -113,7 +117,7 @@
         <!-- ROM Files -->
         <div class="sp-section" data-section="romfiles">
             <h3 class="sp-section-toggle">ROM Files</h3>
-            <label>Folder:</label>
+            <label for="romFolder">Folder:</label>
             <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
                 <input type="file" id="romFolder" webkitdirectory multiple>
                 <span class="status-tag" id="romStatus">--</span>
@@ -170,6 +174,15 @@
                     <span class="status-tag" id="statusKanji">--</span>
                 </div>
             </div>
+            <!-- FM77AV40EX additional ROMs (hidden by default) -->
+            <div class="rom-list rom-list-av40" id="romListAV40" style="display:none;margin-top:6px;">
+                <label style="color:#e8a848;">FM77AV40EX ROMs:</label>
+                <div class="rom-item">
+                    <span class="rom-name">EXTSUB.ROM</span>
+                    <input type="file" id="romExtSub" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusExtSub">--</span>
+                </div>
+            </div>
             <div id="romInfoPanel" style="margin-top:6px;font-size:10px;color:#aaa;display:none;">
                 <details>
                     <summary style="cursor:pointer;color:#8af;">ROM Info <button id="romInfoCopyBtn" style="font-size:8px;padding:0 4px;margin-left:4px;cursor:pointer;">Copy</button></summary>
@@ -184,14 +197,14 @@
         <!-- Disk -->
         <div class="sp-section" data-section="disks">
             <h3 class="sp-section-toggle">Disk Images</h3>
-            <label>Drive 0 <span class="fdc-led" id="fdcLed0"></span></label>
+            <label for="diskFile0">Drive 0 <span class="fdc-led" id="fdcLed0"></span></label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile0" accept=".d77,.D77,.2d,.2D">
                 <button id="diskEjectBtn0" style="font-size:10px;padding:1px 6px;">Eject</button>
             </div>
             <div class="file-name-row" id="diskStatus0">--</div>
             <select id="diskSelect0" style="display:none;width:100%;font-size:11px;margin-top:2px;"></select>
-            <label>Drive 1 <span class="fdc-led" id="fdcLed1"></span></label>
+            <label for="diskFile1">Drive 1 <span class="fdc-led" id="fdcLed1"></span></label>
             <div style="display:flex;align-items:center;gap:4px;">
                 <input type="file" id="diskFile1" accept=".d77,.D77,.2d,.2D">
                 <button id="diskEjectBtn1" style="font-size:10px;padding:1px 6px;">Eject</button>
@@ -202,7 +215,7 @@
                 <span style="font-size:11px;color:#888;" id="fdcTrackInfo">--</span>
             </div>
             <div class="ctrl-row" style="margin-top:6px;">
-                <label>Drive Sound</label>
+                <label for="fddSoundCheck">Drive Sound</label>
                 <input type="checkbox" id="fddSoundCheck">
             </div>
             <div class="ctrl-row" style="display:flex;align-items:center;gap:4px;">
@@ -232,37 +245,74 @@
     </div>
 </div>
 
-<!-- CPU / State Panel -->
+<!-- CPU Panel -->
 <div class="input-panel" id="debugPanel" style="right:auto;left:16px;">
     <div class="ip-header draggable-header">
-        <span>CPU / State</span>
-        <button class="ip-close" id="debugPanelClose">&times;</button>
+        <span>CPU</span>
+        <button class="ip-close" id="debugPanelClose" aria-label="Close CPU panel">&times;</button>
     </div>
     <div class="ip-body">
         <div class="ip-section">
             <div class="ip-label">Status</div>
             <div class="debug-grid">
                 <span class="d-label">State</span><span class="d-val" id="stateVal">Stopped</span>
-                <span class="d-label">Main PC</span><span class="d-val" id="mainPCVal">----</span>
-                <span class="d-label">Sub PC</span><span class="d-val" id="subPCVal">----</span>
                 <span class="d-label">Sub CPU</span><span class="d-val" id="subStateVal">--</span>
+            </div>
+            <div class="ip-label" style="margin-top:6px;">Main CPU</div>
+            <div class="debug-grid" id="mainCpuRegs">
+                <span class="d-label">PC</span><span class="d-val" id="mainPCVal">----</span>
+                <span class="d-label">A</span><span class="d-val" id="mainAVal">--</span>
+                <span class="d-label">B</span><span class="d-val" id="mainBVal">--</span>
+                <span class="d-label">X</span><span class="d-val" id="mainXVal">----</span>
+                <span class="d-label">Y</span><span class="d-val" id="mainYVal">----</span>
+                <span class="d-label">S</span><span class="d-val" id="mainSVal">----</span>
+                <span class="d-label">U</span><span class="d-val" id="mainUVal">----</span>
+                <span class="d-label">DP</span><span class="d-val" id="mainDPVal">--</span>
+                <span class="d-label">CC</span><span class="d-val" id="mainCCVal">--</span>
+            </div>
+            <div class="ip-label" style="margin-top:6px;">Sub CPU</div>
+            <div class="debug-grid" id="subCpuRegs">
+                <span class="d-label">PC</span><span class="d-val" id="subPCVal">----</span>
+                <span class="d-label">A</span><span class="d-val" id="subAVal">--</span>
+                <span class="d-label">B</span><span class="d-val" id="subBVal">--</span>
+                <span class="d-label">X</span><span class="d-val" id="subXVal">----</span>
+                <span class="d-label">Y</span><span class="d-val" id="subYVal">----</span>
+                <span class="d-label">S</span><span class="d-val" id="subSVal">----</span>
+                <span class="d-label">U</span><span class="d-val" id="subUVal">----</span>
+                <span class="d-label">DP</span><span class="d-val" id="subDPVal">--</span>
+                <span class="d-label">CC</span><span class="d-val" id="subCCVal">--</span>
             </div>
             <div class="debug-grid" id="debugAV" style="display:none;margin-top:4px;">
                 <span class="d-label">Monitor</span><span class="d-val" id="subMonVal">--</span>
                 <span class="d-label">Initiator</span><span class="d-val" id="initVal">--</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Memory Panel -->
+<div class="input-panel" id="memPanel" style="right:auto;left:16px;top:320px;">
+    <div class="ip-header draggable-header">
+        <span>Memory</span>
+        <button class="ip-close" id="memPanelClose" aria-label="Close Memory panel">&times;</button>
+    </div>
+    <div class="ip-body">
+        <div class="ip-section" id="memAVSection" style="display:none;">
+            <div class="ip-label">Memory State</div>
+            <div class="debug-grid">
                 <span class="d-label">Boot RAM (BASIC)</span><span class="d-val" id="bootRamVal">--</span>
                 <span class="d-label">MMR</span><span class="d-val" id="mmrVal">--</span>
                 <span class="d-label">MMR Bank ($FD90)</span><span class="d-val" id="mmrBankVal">--</span>
                 <span class="d-label">TWR</span><span class="d-val" id="twrVal">--</span>
                 <span class="d-label">TWR Offset ($FD92)</span><span class="d-val" id="twrOffsetVal">--</span>
             </div>
-            <div class="ip-label" id="mmrMapLabel" style="display:none;margin-top:6px;">MMR Map (logical → physical page)</div>
+            <div class="ip-label" id="mmrMapLabel" style="display:none;margin-top:6px;">MMR Map (logical -> physical page)</div>
             <div id="mmrMapGrid" style="display:none;font-family:monospace;font-size:10px;color:#cde;line-height:1.4;"></div>
             <div class="ip-label" id="physMapLabel" style="display:none;margin-top:6px;">Physical Memory Map</div>
             <div id="physMapGrid" style="display:none;font-family:monospace;font-size:10px;color:#cde;line-height:1.4;"></div>
-            <div style="margin-top:6px;">
-                <button id="stateDumpBtn" style="font-size:11px;padding:2px 8px;cursor:pointer;width:100%;">📋 State Dump</button>
-            </div>
+        </div>
+        <div style="margin-top:6px;">
+            <button id="stateDumpBtn" style="font-size:11px;padding:2px 8px;cursor:pointer;width:100%;">State Dump</button>
         </div>
     </div>
 </div>
@@ -285,7 +335,7 @@
 <div class="input-panel" id="keyPanel">
     <div class="ip-header draggable-header">
         <span>Keyboard</span>
-        <button class="ip-close" id="keyPanelClose">&times;</button>
+        <button class="ip-close" id="keyPanelClose" aria-label="Close Keyboard panel">&times;</button>
     </div>
     <div class="ip-body">
         <div class="ip-section">
@@ -307,15 +357,15 @@
 <div class="input-panel" id="palPanel">
     <div class="ip-header draggable-header">
         <span>Palette</span>
-        <button class="ip-close" id="palPanelClose">&times;</button>
+        <button class="ip-close" id="palPanelClose" aria-label="Close Palette panel">&times;</button>
     </div>
     <div class="ip-body">
         <div class="ip-section">
-            <div class="ip-label">Palette</div>
+            <div class="ip-label" id="palModeLabel">Digital 8 colors</div>
             <div class="palette-row" id="paletteRow"></div>
         </div>
         <div class="ip-section" id="analogPaletteSection" style="display:none;">
-            <div class="ip-label">Analog Palette (4096 colors)</div>
+            <div class="ip-label" id="analogPalLabel">Analog Palette (4096 colors)</div>
             <canvas id="analogPaletteCanvas" width="64" height="64" style="width:128px;height:128px;image-rendering:pixelated;border:1px solid #333;border-radius:3px;"></canvas>
         </div>
     </div>
@@ -325,7 +375,7 @@
 <div class="input-panel" id="sndPanel">
     <div class="ip-header draggable-header">
         <span>PSG / FM</span>
-        <button class="ip-close" id="sndPanelClose">&times;</button>
+        <button class="ip-close" id="sndPanelClose" aria-label="Close PSG / FM panel">&times;</button>
     </div>
     <div class="ip-body">
         <div class="ip-section">
@@ -339,7 +389,7 @@
 <div class="input-panel" id="inputPanel">
     <div class="ip-header draggable-header">
         <span>Input Monitor</span>
-        <button class="ip-close" id="inputPanelClose">&times;</button>
+        <button class="ip-close" id="inputPanelClose" aria-label="Close Input Monitor panel">&times;</button>
     </div>
     <div class="ip-body">
         <div class="ip-section">
@@ -374,7 +424,7 @@
 </div>
 
 <div class="footer">
-    <div>&copy; <span id="copyrightYear">2026</span> <a href="https://x.com/7032" target="_blank" rel="noopener">7032</a> / Naomitsu Tsugiiwa · <a href="#" id="helpLink">マニュアル</a> · <a href="#" id="creditsLink">ライセンス等</a> · <a href="#" id="changelogLink">更新履歴</a> · <a href="#" id="compatLink">対応ソフト</a></div>
+    <div>&copy; <span id="copyrightYear">2026</span> <a href="https://x.com/7032" target="_blank" rel="noopener">7032</a> / Naomitsu Tsugiiwa · <a href="#" id="helpLink">マニュアル</a> · <a href="#" id="creditsLink">ライセンス等</a> · <a href="#" id="changelogLink">更新履歴</a> · <a href="#" id="compatLink">動作確認のご連絡を頂いたソフト</a></div>
     <div class="footer-links">
         <a href="https://github.com/7032" target="_blank" rel="noopener" title="GitHub">
             <svg width="20" height="20" viewBox="0 0 98 96" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"/></svg>
@@ -389,7 +439,7 @@
 <!-- Help Modal -->
 <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
-        <button class="modal-close" id="helpClose">&times;</button>
+        <button class="modal-close" id="helpClose" aria-label="Close Help">&times;</button>
 
         <h1>WebM7 — FM-7 / FM77AV Web Emulator</h1>
         <p>ブラウザ上で動く FM-7 / FM77AV のエミュレータです。<br>
@@ -466,9 +516,10 @@
         </li>
         <li><strong>Toolbar 2行目 (Debug Panels)</strong> — 各ボタンで独立したフローティング・デバッグパネルを開閉できます。
             <ul>
-            <li><strong>CPU</strong> — 動作状態 (State / Main PC / Sub PC / Sub CPU)、FM77AV では Monitor / Initiator / Boot RAM / MMR / TWR / MMR Map / 物理メモリマップ を表示</li>
+            <li><strong>CPU</strong> — Main/Sub CPU の全レジスタ (A/B/X/Y/S/U/PC/DP/CC)、動作状態、FM77AV では Monitor / Initiator を表示</li>
+            <li><strong>Memory</strong> — FM77AV 時のメモリ状態 (Boot RAM / MMR / TWR / MMR Map / 物理メモリマップ)、State Dump ボタン</li>
             <li><strong>Keyboard</strong> — キー入力表示、FM-7 キーボードレイアウト、BREAK キー変更</li>
-            <li><strong>Palette</strong> — デジタルパレット (8色スウォッチ)、FM77AV ではアナログパレット (4096色) も表示</li>
+            <li><strong>Palette</strong> — 画面モードに応じたパレット表示 (Digital 8色 / 4,096色 / 262,144色)。320x200 / 262K モードではアナログパレットキャンバスも表示</li>
             <li><strong>Sound</strong> — PSG レジスタ</li>
             <li><strong>Input</strong> — Input Monitor パネルの開閉 (後述)</li>
             </ul>
@@ -478,7 +529,7 @@
         <h3>右側 — サイドパネル</h3>
         <table>
         <tr><th>セクション</th><th>内容</th></tr>
-        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV）、Boot Mode（Auto / DOS / BASIC）、FM Sound Card（FM-7のみ）、FDD Sound（ディスク動作音のON/OFF・音量調整）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Powerスライドスイッチ（ON/OFF）、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
+        <tr><td><strong>Control</strong></td><td>Machine（FM-7 / FM77AV / FM77AV40 / FM77AV40EX）、Boot Mode（Auto / DOS / BASIC）、FM Sound Card（FM-7のみ）、FDD Sound（ディスク動作音のON/OFF・音量調整）、Joystick ポート（Port 1 / Port 2）、Cursor → Numpad（カーソルキーをテンキー代用）の選択。Powerスライドスイッチ（ON/OFF）、Pause/Resume、Reset ボタン。📷ボタンで画面をPNG保存</td></tr>
         <tr><td><strong>ROM Files</strong></td><td>ROM ファイルの読み込み（フォルダ一括 or 個別指定）。各 ROM の横に OK が出れば成功。ROM Info で読み込み済みROMのサイズ・ハッシュを確認可能（Copy ボタンでクリップボードにコピー）</td></tr>
         <tr><td><strong>Disk Images</strong></td><td>D77 形式のディスクイメージを Drive 0 / Drive 1 にセット。セット時にファイル名を表示。Eject ボタンで取り出し。FDC アクセスLED付き</td></tr>
         <tr><td><strong>Tape Image</strong></td><td>T77 形式のテープイメージをセット。REW（巻き戻し）、Eject ボタン。CMT LED付き</td></tr>
@@ -531,7 +582,7 @@
 <!-- Compat Modal -->
 <div class="modal-overlay" id="compatModal">
     <div class="modal-content">
-        <button class="modal-close" id="compatClose">&times;</button>
+        <button class="modal-close" id="compatClose" aria-label="Close Compatibility list">&times;</button>
 
         <div id="compatBody"><p style="color:#6688aa;">読み込み中...</p></div>
 
@@ -544,7 +595,7 @@
 <!-- Changelog Modal -->
 <div class="modal-overlay" id="changelogModal">
     <div class="modal-content">
-        <button class="modal-close" id="changelogClose">&times;</button>
+        <button class="modal-close" id="changelogClose" aria-label="Close Changelog">&times;</button>
 
         <h1>更新履歴</h1>
         <div id="changelogBody"><p style="color:#6688aa;">読み込み中...</p></div>
@@ -558,7 +609,7 @@
 <!-- Credits Modal -->
 <div class="modal-overlay" id="creditsModal">
     <div class="modal-content">
-        <button class="modal-close" id="creditsClose">&times;</button>
+        <button class="modal-close" id="creditsClose" aria-label="Close Credits">&times;</button>
 
         <h1>クレジット</h1>
 
@@ -567,15 +618,17 @@
         <li>Motorola MC6809 Programming Manual / Data Sheet</li>
         <li>Fujitsu MB8877 Data Sheet</li>
         <li>General Instrument AY-3-8910 Data Sheet</li>
-        <li>富士通 FM-7 テクニカルリファレンスマニュアル</li>
+        <li>公開されている当時の技術情報</li>
         <li><a href="https://www.pc98.org/project/doc/d88.html" target="_blank" rel="noopener">D88 Disk Image Format Specification</a></li>
         </ul>
 
         <h2>謝辞</h2>
-        <p>以下のサイトを参考にさせて頂きました。</p>
+        <p>FM-7 / FM77AV エミュレータ <a href="https://retropc.net/pi/xm7/" target="_blank" rel="noopener">XM7</a> (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/deed.ja" target="_blank" rel="noopener">CC-BY-NC-SA 4.0</a>) 開発者の皆様に謝意を表します。開発初期、FM-7 の動作確認の参考にさせて頂きました。</p>
         <ul>
-        <li><a href="http://retropc.net/pi/xm7/" target="_blank" rel="noopener">XM7 - RetroPC</a></li>
-        <li><a href="https://xm7.na.coocan.jp/" target="_blank" rel="noopener">OREism III</a></li>
+        <li>PI. 氏</li>
+        <li>たけがみりう 氏</li>
+        <li>トマ 氏</li>
+        <li>GIMONS 氏</li>
         </ul>
 
         <h2>ROMファイルの取り扱いについて</h2>
@@ -628,7 +681,7 @@ SOFTWARE.</pre>
 </div>
 
 <script type="module">
-import { FM7, MACHINE_FM7, MACHINE_FM77AV } from './js/fm7.js';
+import { FM7, MACHINE_FM7, MACHINE_FM77AV, MACHINE_FM77AV40, MACHINE_FM77AV40EX } from './js/fm7.js';
 
 // =========================================================================
 // Initialization
@@ -836,14 +889,17 @@ const psgRegsEl       = document.getElementById('psgRegs');
 
 // FM77AV ROM elements
 const romListAV       = document.getElementById('romListAV');
+const romListAV40     = document.getElementById('romListAV40');
 const romInitiateInput = document.getElementById('romInitiate');
 const romSubSysAInput  = document.getElementById('romSubSysA');
 const romSubSysBInput  = document.getElementById('romSubSysB');
 const romKanjiInput    = document.getElementById('romKanji');
+const romExtSubInput   = document.getElementById('romExtSub');
 const statusInitiateEl = document.getElementById('statusInitiate');
 const statusSubSysAEl  = document.getElementById('statusSubSysA');
 const statusSubSysBEl  = document.getElementById('statusSubSysB');
 const statusKanjiEl    = document.getElementById('statusKanji');
+const statusExtSubEl   = document.getElementById('statusExtSub');
 const siteTitle        = document.getElementById('siteTitle');
 
 // =========================================================================
@@ -854,38 +910,44 @@ const debugAV   = document.getElementById('debugAV');
 const subMonVal = document.getElementById('subMonVal');
 const initVal   = document.getElementById('initVal');
 
+const machineTypeSelect = document.getElementById('machineTypeSelect');
+
 function updateMachineType() {
-    const machineType = document.querySelector('input[name="machineType"]:checked').value;
+    const machineType = machineTypeSelect.value;
     fm7.setMachineType(machineType);
 
-    const isAV = machineType === MACHINE_FM77AV;
+    const isAV = machineType !== MACHINE_FM7;
     romListAV.style.display = isAV ? '' : 'none';
+    romListAV40.style.display = machineType === MACHINE_FM77AV40EX ? '' : 'none';
     debugAV.style.display = isAV ? '' : 'none';
+    document.getElementById('memAVSection').style.display = isAV ? '' : 'none';
     // FM sound card option: FM-7 only (FM77AV has OPN built-in)
     document.getElementById('fmCardRow').style.display = isAV ? 'none' : '';
 
     // Update title
-    if (isAV) {
-        siteTitle.textContent = 'WebM7 — FM77AV Web Emulator';
-    } else {
-        siteTitle.textContent = 'WebM7 — FM-7 Web Emulator';
-    }
+    const titles = {
+        [MACHINE_FM7]:        'WebM7 — FM-7 Web Emulator',
+        [MACHINE_FM77AV]:     'WebM7 — FM77AV Web Emulator',
+        [MACHINE_FM77AV40]:   'WebM7 — FM77AV40 Web Emulator',
+        [MACHINE_FM77AV40EX]: 'WebM7 — FM77AV40EX Web Emulator',
+    };
+    siteTitle.textContent = titles[machineType] || titles[MACHINE_FM7];
 }
 
-document.querySelectorAll('input[name="machineType"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        updateMachineType();
-        if (typeof updateRomInfo === 'function') updateRomInfo();
-        // Persist machine type to IndexedDB
-        const mt = document.querySelector('input[name="machineType"]:checked').value;
-        saveSetting('machineType', mt);
-    });
+machineTypeSelect.addEventListener('change', () => {
+    updateMachineType();
+    if (typeof updateRomInfo === 'function') updateRomInfo();
+    saveSetting('machineType', machineTypeSelect.value);
 });
 
 // Lock control groups during VM run (machineType, bootMode, fmCard locked; joyPort stays live)
 const _lockedRadioState = {};
 function setControlsLocked(locked) {
-    ['machineType', 'bootMode'].forEach(name => {
+    // machineType is a <select>
+    machineTypeSelect.disabled = locked;
+    if (locked) _lockedRadioState['machineType'] = machineTypeSelect.value;
+    // bootMode is radio group
+    ['bootMode'].forEach(name => {
         const group = document.querySelector(`input[name="${name}"]`).closest('.radio-group');
         group.classList.toggle('locked', locked);
         if (locked) {
@@ -897,8 +959,8 @@ function setControlsLocked(locked) {
     const fmCheck = document.getElementById('fmCardCheck');
     fmCheck.disabled = locked;
 }
-// Block radio changes during run by reverting to saved state
-['machineType', 'bootMode'].forEach(name => {
+// Block bootMode radio changes during run by reverting to saved state
+['bootMode'].forEach(name => {
     document.querySelectorAll(`input[name="${name}"]`).forEach(radio => {
         radio.addEventListener('click', (e) => {
             if (!fm7._running) return;
@@ -983,7 +1045,7 @@ document.getElementById('screenshotBtn').addEventListener('click', () => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        const machineType = document.querySelector('input[name="machineType"]:checked').value;
+        const machineType = machineTypeSelect.value;
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         a.download = `${machineType}_${ts}.png`;
         a.href = url;
@@ -1254,6 +1316,7 @@ const ROM_FILE_MAP = {
     'subsys_a.rom': { loader: (d) => fm7.loadSubROM_A(d),  status: () => statusSubSysAEl, slot: 'subsys_a' },
     'subsys_b.rom': { loader: (d) => fm7.loadSubROM_B(d),  status: () => statusSubSysBEl, slot: 'subsys_b' },
     'kanji.rom':   { loader: (d) => fm7.loadKanjiROM(d),   status: () => statusKanjiEl,   slot: 'kanji' },
+    'extsub.rom':  { loader: (d) => fm7.loadExtSubROM(d), status: () => statusExtSubEl,  slot: 'extsub' },
 };
 
 romFolderInput.addEventListener('change', async (e) => {
@@ -1312,6 +1375,9 @@ setupIndividualROM(romSubSysBInput,  (d) => fm7.loadSubROM_B(d),   statusSubSysB
 setupIndividualROM(romCGInput,       (d) => fm7.loadCGROM(d),      statusCGEl,      'cg');
 setupIndividualROM(romKanjiInput,    (d) => fm7.loadKanjiROM(d),   statusKanjiEl,   'kanji');
 
+// FM77AV40EX ROMs
+setupIndividualROM(romExtSubInput,   (d) => fm7.loadExtSubROM(d),  statusExtSubEl,  'extsub');
+
 // Restore persisted settings from IndexedDB on startup.
 // One-time migration: pull from legacy localStorage if IndexedDB is empty.
 (async function restoreSettings() {
@@ -1320,13 +1386,10 @@ setupIndividualROM(romKanjiInput,    (d) => fm7.loadKanjiROM(d),   statusKanjiEl
     if (mt === undefined) {
         // No legacy storage for machineType — leave default (FM-7)
     }
-    if (mt === 'fm7' || mt === 'fm77av') {
-        const r = document.querySelector(`input[name="machineType"][value="${mt}"]`);
-        if (r) {
-            r.checked = true;
-            updateMachineType();
-            if (typeof updateRomInfo === 'function') updateRomInfo();
-        }
+    if (mt === 'fm7' || mt === 'fm77av' || mt === 'fm77av40' || mt === 'fm77av40ex') {
+        machineTypeSelect.value = mt;
+        updateMachineType();
+        if (typeof updateRomInfo === 'function') updateRomInfo();
     }
 
     // Boot mode override
@@ -1444,7 +1507,7 @@ async function updateRomInfo() {
     const text = document.getElementById('romInfoText');
     const lines = [];
 
-    const isAV = document.querySelector('input[name="machineType"]:checked').value === 'fm77av';
+    const isAV = machineTypeSelect.value !== 'fm7';
     const roms = [
         { name: 'FBASIC30.ROM', data: fm7.fbasicROM, loaded: fm7.romLoaded.fbasic,
           size: fm7._fbasicSize },
@@ -1466,6 +1529,10 @@ async function updateRomInfo() {
             { name: 'KANJI.ROM',   data: fm7.kanjiROM, loaded: fm7.romLoaded.kanji,
               size: fm7._kanjiSize },
         ] : []),
+        ...(machineTypeSelect.value === 'fm77av40ex' ? [
+            { name: 'EXTSUB.ROM', data: fm7.extsubROM, loaded: fm7.romLoaded.extsub,
+              size: fm7._extsubROMSize },
+        ] : []),
     ];
 
     let anyLoaded = false;
@@ -1476,9 +1543,6 @@ async function updateRomInfo() {
         const buf = (rom.data instanceof ArrayBuffer) ? rom.data : rom.data.buffer;
         const hash = await hashHex(buf.slice(0, size));
         let info = `${rom.name}: ${size} bytes  hash=${hash}`;
-        if (rom.name === 'INITIATE.ROM' && fm7._initiateOriginalModel) {
-            info += `\n  → Original model: ${fm7._initiateOriginalModel}`;
-        }
         lines.push(info);
     }
 
@@ -1889,8 +1953,11 @@ setInterval(() => {
     kbdKeyMap.get('CapsLock')?.classList.toggle('active', !!caps);
     kbdKeyMap.get('AltRight')?.classList.toggle('active', !!kana);
     // Keyboard mode indicator (ASCII / SCAN) — FM77AV はサブCPUコマンドで動的切替
+    const kbdMode = fm7.keyboard?._useScanCodes ? 'SCAN' : 'ASCII';
     const modeEl = document.getElementById('kbdModeVal');
-    if (modeEl) modeEl.textContent = fm7.keyboard?._useScanCodes ? 'SCAN' : 'ASCII';
+    if (modeEl) modeEl.textContent = kbdMode;
+    const tbMode = document.getElementById('tbKbdMode');
+    if (tbMode) tbMode.textContent = kbdMode;
 }, 200);
 
 // BREAK key configuration
@@ -1940,13 +2007,32 @@ fm7._frameCallback = () => {
     fpsLabel.textContent = status.running ? status.fps + ' fps' : '--';
     {
         const d = fm7.display;
-        const baseMode = d.displayMode === 0 ? '640x200' : '320x200';
-        dispModeLabel.textContent = baseMode;
+        const modeNames = ['640x200', '320x200', '262K', '640x400'];
+        dispModeLabel.textContent = modeNames[d.displayMode] || '??';
     }
-    mainPCValEl.textContent = '$' + status.mainPC.toString(16).toUpperCase().padStart(4, '0');
-    subPCValEl.textContent = '$' + status.subPC.toString(16).toUpperCase().padStart(4, '0');
     subStateValEl.textContent = status.subHalted ? 'HALT' : 'RUN';
     subStateValEl.style.color = status.subHalted ? '#cc6666' : '#00cc66';
+    // CPU registers
+    const h2 = v => '$' + (v||0).toString(16).toUpperCase().padStart(2, '0');
+    const h4 = v => '$' + (v||0).toString(16).toUpperCase().padStart(4, '0');
+    const mc = fm7.mainCPU, sc = fm7.subCPU;
+    mainPCValEl.textContent = h4(mc.pc); subPCValEl.textContent = h4(sc.pc);
+    document.getElementById('mainAVal').textContent = h2(mc.a);
+    document.getElementById('mainBVal').textContent = h2(mc.b);
+    document.getElementById('mainXVal').textContent = h4(mc.x);
+    document.getElementById('mainYVal').textContent = h4(mc.y);
+    document.getElementById('mainSVal').textContent = h4(mc.s);
+    document.getElementById('mainUVal').textContent = h4(mc.u);
+    document.getElementById('mainDPVal').textContent = h2(mc.dp);
+    document.getElementById('mainCCVal').textContent = h2(mc.cc);
+    document.getElementById('subAVal').textContent = h2(sc.a);
+    document.getElementById('subBVal').textContent = h2(sc.b);
+    document.getElementById('subXVal').textContent = h4(sc.x);
+    document.getElementById('subYVal').textContent = h4(sc.y);
+    document.getElementById('subSVal').textContent = h4(sc.s);
+    document.getElementById('subUVal').textContent = h4(sc.u);
+    document.getElementById('subDPVal').textContent = h2(sc.dp);
+    document.getElementById('subCCVal').textContent = h2(sc.cc);
 
     // Update FDC access LEDs (use latch for access that completes between updates)
     if (status.running) {
@@ -1993,9 +2079,10 @@ fm7._frameCallback = () => {
     }
 
     // FM77AV-only debug info
-    if (status.machineType === MACHINE_FM77AV) {
-        const monNames = ['Type-C', 'Type-A', 'Type-B'];
-        subMonVal.textContent = monNames[status.subMonitorType] || '??';
+    if (status.machineType !== MACHINE_FM7) {
+        const monNames = ['Type-C', 'Type-A', 'Type-B', 'CG'];
+        const t = status.subMonitorType;
+        subMonVal.textContent = monNames[t] || (t >= 4 ? `Type-D${t - 4}` : '??');
         initVal.textContent = status.initiatorActive ? 'ACTIVE' : 'OFF';
         initVal.style.color = status.initiatorActive ? '#e8a848' : '#6688aa';
 
@@ -2032,9 +2119,26 @@ fm7._frameCallback = () => {
         mmrMapGrid.textContent  = mmrRows;
         physMapGrid.textContent = physRows;
 
+        // Update palette mode label based on display mode
+        const palModeLabel = document.getElementById('palModeLabel');
+        const analogPalLabel = document.getElementById('analogPalLabel');
+        const dm = fm7.display.displayMode;
+        if (dm === 2) {
+            // 262K color mode
+            if (palModeLabel) palModeLabel.textContent = '262,144 colors';
+            if (analogPalLabel) analogPalLabel.textContent = 'Analog Palette (262,144 colors)';
+        } else if (dm === 1) {
+            // 4096 color mode
+            if (palModeLabel) palModeLabel.textContent = '4,096 colors';
+            if (analogPalLabel) analogPalLabel.textContent = 'Analog Palette (4,096 colors)';
+        } else {
+            // 640x200 or 640x400: 8 color digital
+            if (palModeLabel) palModeLabel.textContent = 'Digital 8 colors';
+        }
+
         // Update analog palette canvas (4096 colors in 64x64 grid)
-        analogPaletteSection.style.display = '';
-        if (fm7._analogPalette) {
+        analogPaletteSection.style.display = (dm === 1 || dm === 2) ? '' : 'none';
+        if (fm7._analogPalette && (dm === 1 || dm === 2)) {
             for (let i = 0; i < 4096; i++) {
                 const entry = fm7._analogPalette[i] || 0;
                 const b8 = ((entry >> 8) & 0xF) * 17;
@@ -2047,6 +2151,8 @@ fm7._frameCallback = () => {
         }
     } else {
         analogPaletteSection.style.display = 'none';
+        const palModeLabel2 = document.getElementById('palModeLabel');
+        if (palModeLabel2) palModeLabel2.textContent = 'Digital 8 colors';
         const mmrMapLabel = document.getElementById('mmrMapLabel');
         const mmrMapGrid  = document.getElementById('mmrMapGrid');
         const physMapLabel = document.getElementById('physMapLabel');
@@ -2057,94 +2163,6 @@ fm7._frameCallback = () => {
         if (physMapGrid)  physMapGrid.style.display  = 'none';
     }
 
-    // Stall detector: detects both exact-PC stalls and range-loop stalls
-    if (status.running) {
-        const mainPC = status.mainPC;
-        const subPC = status.subPC;
-
-        // Track sub CPU PC range over time
-        if (!window._subPCMin) { window._subPCMin = 0xFFFF; window._subPCMax = 0; window._rangeCount = 0; }
-        window._subPCMin = Math.min(window._subPCMin, subPC);
-        window._subPCMax = Math.max(window._subPCMax, subPC);
-        window._rangeCount++;
-        // Every 300 samples (~5 sec at 60fps), check if sub CPU is in a tight loop
-        if (window._rangeCount >= 300 && !window._stallDumped) {
-            const range = window._subPCMax - window._subPCMin;
-            if (range < 256 && range > 0) {
-                // Sub CPU stuck in small range - trigger dump
-                window._stallCount = 180;
-            }
-            window._subPCMin = 0xFFFF; window._subPCMax = 0; window._rangeCount = 0;
-        }
-
-        if (mainPC === window._lastMainPC && subPC === window._lastSubPC) {
-            window._stallCount = (window._stallCount || 0) + 1;
-        } else if (!window._stallDumped) {
-            // Only reset if range detector hasn't already triggered
-            if ((window._stallCount || 0) < 180) window._stallCount = 0;
-        }
-        if (window._stallCount >= 180 && !window._stallDumped) {
-                window._stallDumped = true;
-                const hex = (a, n) => {
-                    const b = [];
-                    for (let i = 0; i < n; i++) b.push(fm7._mainRead(a+i).toString(16).padStart(2,'0'));
-                    return b.join(' ');
-                };
-                const subHex = (a, n) => {
-                    const b = [];
-                    for (let i = 0; i < n; i++) b.push(fm7._subRead(a+i).toString(16).padStart(2,'0'));
-                    return b.join(' ');
-                };
-                console.warn(`[STALL] MainPC=$${mainPC.toString(16).toUpperCase()} SubPC=$${subPC.toString(16).toUpperCase()}`);
-                console.warn(`  Main @-16: ${hex(mainPC - 16, 16)}`);
-                console.warn(`  Main code: ${hex(mainPC, 16)}`);
-                console.warn(`  Sub code:  ${subHex(subPC, 16)}`);
-                console.warn(`  SubBusy=${fm7._subBusy} SubHalted=${fm7._subHalted} SubAttn=${fm7._subAttn} NMImask=${fm7._nmiMaskSub}`);
-                console.warn(`  $FD04=${fm7._mainIORead(0xFD04).toString(16)} $FD05=${fm7._mainIORead(0xFD05).toString(16)}`);
-                console.warn(`  ALU cmd=$${fm7.display.aluCommand.toString(16)} color=$${fm7.display.aluColor.toString(16)} mask=$${fm7.display.aluMask.toString(16)} disable=$${fm7.display.aluDisable.toString(16)}`);
-                console.warn(`  FDC: status=$${fm7.fdc.statusReg.toString(16)} track=${fm7.fdc.trackReg} sector=${fm7.fdc.sectorReg} drq=${fm7.fdc.drqFlag} irq=${fm7.fdc.irqFlag} state=${fm7.fdc.state} motor=${fm7.fdc.motorOn} drive=${fm7.fdc.currentDrive}`);
-                console.warn(`  Main DP=$${(fm7.mainCPU.dp||0).toString(16)} CC=$${(fm7.mainCPU.cc||0).toString(16)}`);
-                console.warn(`  Main A=$${(fm7.mainCPU.a||0).toString(16).padStart(2,'0')} B=$${(fm7.mainCPU.b||0).toString(16).padStart(2,'0')} X=$${(fm7.mainCPU.x||0).toString(16).padStart(4,'0')} Y=$${(fm7.mainCPU.y||0).toString(16).padStart(4,'0')} U=$${(fm7.mainCPU.u||0).toString(16).padStart(4,'0')} S=$${(fm7.mainCPU.s||0).toString(16).padStart(4,'0')}`);
-                console.warn(`  MMR: enabled=${fm7._mmrEnabled} bank=$FD90=${fm7._mmrBankReg} basicROM=${fm7._basicRomEnabled}`);
-                if (fm7._mmrEnabled && fm7._mmrRegs) {
-                    const mr = fm7._mmrRegs;
-                    const b0 = Array.from(mr.slice(0, 16)).map(v => v.toString(16).padStart(2,'0')).join(' ');
-                    const b1 = Array.from(mr.slice(16, 32)).map(v => v.toString(16).padStart(2,'0')).join(' ');
-                    console.warn(`  MMR bank0: ${b0}`);
-                    console.warn(`  MMR bank1: ${b1}`);
-                }
-                console.warn(`  MISC=$${fm7.display.miscReg.toString(16)} multiPage=$${fm7.display.multiPage.toString(16)} mode=${fm7.display.displayMode} activePg=${fm7.display.activeVramPage} dispPg=${fm7.display.displayVramPage}`);
-                // Sub CPU vectors (from current ROM bank)
-                const sv = (a) => {
-                    const hi = fm7._subRead(a);
-                    const lo = fm7._subRead(a+1);
-                    return '$' + ((hi<<8)|lo).toString(16).toUpperCase().padStart(4,'0');
-                };
-                console.warn(`  Sub vectors: NMI=${sv(0xFFFC)} FIRQ=${sv(0xFFF6)} IRQ=${sv(0xFFF8)} RST=${sv(0xFFFE)}`);
-                // Sub CPU shared RAM content
-                console.warn(`  Shared RAM $D380: ${subHex(0xD380, 16)}`);
-                console.warn(`  Shared RAM $D390: ${subHex(0xD390, 16)}`);
-                // Sub CPU registers and stack
-                const sp = fm7.subCPU.s || 0;
-                const cpu = fm7.subCPU;
-                console.warn(`  Sub SP=$${sp.toString(16).toUpperCase()} A=$${(cpu.a||0).toString(16).padStart(2,'0')} B=$${(cpu.b||0).toString(16).padStart(2,'0')} X=$${(cpu.x||0).toString(16).padStart(4,'0')} Y=$${(cpu.y||0).toString(16).padStart(4,'0')} U=$${(cpu.u||0).toString(16).padStart(4,'0')} DP=$${(cpu.dp||0).toString(16).padStart(2,'0')}`);
-                console.warn(`  Sub stack: ${subHex(sp, 16)}`);
-                // NMI handler code
-                const nmiVec = (fm7._subRead(0xFFFC)<<8)|fm7._subRead(0xFFFD);
-                console.warn(`  NMI handler @$${nmiVec.toString(16).toUpperCase()}: ${subHex(nmiVec, 24)}`);
-                // FIRQ handler code
-                const firqVec = (fm7._subRead(0xFFF6)<<8)|fm7._subRead(0xFFF7);
-                console.warn(`  FIRQ handler @$${firqVec.toString(16).toUpperCase()}: ${subHex(firqVec, 24)}`);
-                // Work RAM around crash area ($D100-$D120)
-                // Dump sub CPU loop area
-                console.warn(`  Sub $D090: ${subHex(0xD090, 32)}`);
-                console.warn(`  Sub $D0B0: ${subHex(0xD0B0, 32)}`);
-                console.warn(`  Sub $D0D0: ${subHex(0xD0D0, 32)}`);
-                console.warn(`  Sub $D0F0: ${subHex(0xD0F0, 32)}`);
-        }
-        window._lastMainPC = mainPC;
-        window._lastSubPC = subPC;
-    }
 };
 
 // =========================================================================
@@ -2197,6 +2215,7 @@ function wireDebugPanel(panelId, btnId, closeId) {
 }
 
 const debugPanel = wireDebugPanel('debugPanel', 'debugPanelBtn', 'debugPanelClose');
+const memPanel   = wireDebugPanel('memPanel',   'memPanelBtn',   'memPanelClose');
 const keyPanel   = wireDebugPanel('keyPanel',   'keyPanelBtn',   'keyPanelClose');
 const palPanel   = wireDebugPanel('palPanel',   'palPanelBtn',   'palPanelClose');
 const sndPanel   = wireDebugPanel('sndPanel',   'sndPanelBtn',   'sndPanelClose');
@@ -2239,6 +2258,7 @@ function makeDraggable(panel) {
 
 makeDraggable(inputPanel);
 makeDraggable(debugPanel);
+makeDraggable(memPanel);
 makeDraggable(keyPanel);
 makeDraggable(palPanel);
 makeDraggable(sndPanel);
@@ -2316,7 +2336,7 @@ function generateStateDump() {
     lines.push(`  PC=$${h4(sPC)} SP=$${h4(sc.s||0)} USP=$${h4(sc.u||0)} X=$${h4(sc.x||0)} Y=$${h4(sc.y||0)}`);
     lines.push(`  A=$${h2(sc.a||0)} B=$${h2(sc.b||0)} DP=$${h2(sc.dp||0)} CC=$${h2(sc.cc||0)}  intr=$${h2(sc.intr||0)}`);
     lines.push(`  Halted=${fm7._subHalted} Busy=${fm7._subBusy} Attn=${fm7._subAttn} NMImask=${fm7._nmiMaskSub} BREAK=${fm7._breakKey}`);
-    lines.push(`  Monitor bank: ${fm7._subMonitorType} (0=C,1=A,2=B)`);
+    lines.push(`  Monitor bank: ${fm7._subMonitorType} (0=C,1=A,2=B,4+=D)`);
     lines.push(`  Code @PC-16: ${subHex(sPC - 16, 16)}`);
     lines.push(`  Code @PC   : ${subHex(sPC, 32)}`);
     lines.push(`  Stack @SP  : ${subHex((sc.s||0), 16)}`);
@@ -2627,7 +2647,7 @@ function parseCompatMd(md) {
         }
         if (/^[|\s\-:]+$/.test(line)) continue;
         const cells = line.split('|').slice(1, -1).map(c => c.trim());
-        if (cells.length < 2) continue;
+        if (cells.length < 1) continue;
         const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
                                  .replace(/`(.+?)`/g, '<code>$1</code>')
                                  .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');

@@ -43,8 +43,14 @@ const STATUS = {
     NOT_READY:      0x80,
 };
 
-// Step rates in microseconds (for 1MHz clock reference)
-const STEP_RATES = [6000, 12000, 20000, 30000]; // 6ms, 12ms, 20ms, 30ms
+// Step rates in CPU cycles (accelerated).
+// Real MB8877 rates are 6/12/20/30 ms, but emulating real-time delays
+// causes SEEK to span multiple VBlank periods. Games that call the boot
+// ROM with IRQ enabled (timer IRQ vector pointing to game code) will be
+// preempted mid-SEEK, never returning to the boot ROM polling loop.
+// Accelerated rates keep SEEK fast enough to avoid this class of bugs
+// while still producing a visible BUSY period for polling loops.
+const STEP_RATES = [200, 400, 600, 1000];
 
 // D77 header size
 const D77_HEADER_SIZE = 0x2B0;
@@ -310,6 +316,7 @@ export class FDC {
         this.currentSide = 0;
         this.motorOn = false;
         this.densityFlag = false; // bit4 of $FD1C
+        this.hdMode = false;     // $FD1E bit6: HD data rate (AV40+)
 
         // Registers
         this.statusReg = 0;
@@ -591,7 +598,7 @@ export class FDC {
     // MB8877 RNF search window: 5 index pulses (5 revolutions at 300rpm = 1s)
     // Real hardware keeps BUSY asserted while scanning sector IDs; only after
     // 5 index pulses without a matching R does it set RNF and raise INTRQ.
-    // Copy-protection routines use this timing as part of their check.
+    // Some software relies on this timing behavior.
     static RNF_TIMEOUT_US = 1000000;
 
     // CPU-clock-dependent cycle counts (set by setCPUClock)
@@ -867,6 +874,11 @@ export class FDC {
             case 0xFD1D: // Drive select + motor
                 this.currentDrive = value & 0x03;
                 this.motorOn = (value & 0x80) !== 0;
+                break;
+
+            case 0xFD1E: // Mode register (FM77AV40: density/rate control)
+                // bit 6: HD data rate select (1=500kbps/2HD, 0=250kbps/2DD)
+                this.hdMode = (value & 0x40) !== 0;
                 break;
 
             default:
@@ -1245,11 +1257,11 @@ export class FDC {
             // enough to perturb the loader timing of other games.
             this.trackReg = 0;
             this.headPosition[this.currentDrive] = 0;
-            this.delayCycles = this.cmdFlags.v ? 30000 : 200;
+            this.delayCycles = this.cmdFlags.v ? 2000 : 200;
             this.state = FDC_STATE.SEEK_VERIFY;
         } else {
             // Step toward track 0
-            this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
+            this.delayCycles = STEP_RATES[this.cmdFlags.r];
             this.state = FDC_STATE.SEEK_STEPPING;
         }
     }
@@ -1266,14 +1278,14 @@ export class FDC {
             // wait for BUSY=1 can observe the transient (see comment in
             // _beginSeekRestore). Use a minimal 200-cycle delay.
             this.trackReg = target;
-            this.delayCycles = this.cmdFlags.v ? 30000 : 200;
+            this.delayCycles = this.cmdFlags.v ? 2000 : 200;
             this.state = FDC_STATE.SEEK_VERIFY;
             return;
         }
 
         this.stepDirection = (target > headPos) ? 1 : -1;
         this.trackReg = headPos; // Sync trackReg with actual head position
-        this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
+        this.delayCycles = STEP_RATES[this.cmdFlags.r];
         this.state = FDC_STATE.SEEK_STEPPING;
     }
 
@@ -1281,7 +1293,7 @@ export class FDC {
     _beginStep(directionSet) {
         // directionSet: whether to change stepDirection (Step In/Out set it, plain Step doesn't)
         // stepDirection already set by caller for Step In/Out
-        this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
+        this.delayCycles = STEP_RATES[this.cmdFlags.r];
         this.state = FDC_STATE.SEEK_STEPPING;
     }
 
@@ -1298,14 +1310,14 @@ export class FDC {
                 this.headPosition[this.currentDrive] = 0;
                 if (this.cmdFlags.v) {
                     this.state = FDC_STATE.SEEK_VERIFY;
-                    this.delayCycles = 30000;
+                    this.delayCycles = 2000;
                 } else {
                     this._completeTypeI();
                 }
                 return;
             }
             this.headPosition[this.currentDrive] = pos;
-            this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
+            this.delayCycles = STEP_RATES[this.cmdFlags.r];
         } else if (cmd === 0x10) {
             // Seek
             const target = this.dataReg;
@@ -1319,13 +1331,13 @@ export class FDC {
                 this.headPosition[this.currentDrive] = target;
                 if (this.cmdFlags.v) {
                     this.state = FDC_STATE.SEEK_VERIFY;
-                    this.delayCycles = 30000;
+                    this.delayCycles = 2000;
                 } else {
                     this._completeTypeI();
                 }
                 return;
             }
-            this.delayCycles = STEP_RATES[this.cmdFlags.r] * 2;
+            this.delayCycles = STEP_RATES[this.cmdFlags.r];
         } else {
             // Step / Step In / Step Out
             this.headPosition[this.currentDrive] += this.stepDirection;
@@ -1339,7 +1351,7 @@ export class FDC {
             }
             if (this.cmdFlags.v) {
                 this.state = FDC_STATE.SEEK_VERIFY;
-                this.delayCycles = 30000;
+                this.delayCycles = 2000;
             } else {
                 this._completeTypeI();
             }
@@ -1403,7 +1415,7 @@ export class FDC {
             }
             // MB8877: on missing sector, keep BUSY asserted while searching
             // for 5 index pulses (5 revolutions ≈ 1 s at 300rpm), then assert
-            // RNF + INTRQ. Copy-protection routines can depend on this delay.
+            // RNF + INTRQ. Some software depends on this delay.
             this.statusReg = STATUS.BUSY;
             this.drqFlag = false;
             this.state = FDC_STATE.RNF_WAIT;
@@ -1431,11 +1443,9 @@ export class FDC {
         if (sector.deleted) {
             statusExtra |= STATUS.RECORD_TYPE;
         }
-        // D77 status field: reflect errors to FDC status
-        // Copy-protected sectors often have intentional CRC errors.
-        // D77 dumps record this as various non-zero status values
-        // ($B0, $E0, $10, etc.) — not always with the exact CRC bit set.
-        // Any non-zero D77 status indicates an abnormal sector.
+        // D77 status field: reflect errors to FDC status.
+        // D77 dumps record abnormal sectors as various non-zero status
+        // values ($B0, $E0, $10, etc.). Any non-zero value sets CRC_ERROR.
         if (sector.status !== 0) {
             statusExtra |= STATUS.CRC_ERROR;
         }
@@ -1448,9 +1458,8 @@ export class FDC {
         // rotation) is asynchronous to the CPU crystal.  The PLL re-acquires
         // lock on each sector's sync field; the lock phase drifts slightly
         // with each successive sector read.  Software that compares poll-loop
-        // counts across two sector reads (timing-based copy protection)
-        // expects the second read to produce 32-255 more polling iterations
-        // than the first.
+        // counts across two sector reads expects the second read to produce
+        // 32-255 more polling iterations than the first.
         //
         // We model this with a monotonically increasing drift counter that
         // resets on Type I commands (RESTORE/SEEK).  Each READ adds a small
@@ -1794,6 +1803,7 @@ export class FDC {
         this._pendingDrq = false;
         this._drqTimer = 0;
         this.motorOn = false;
+        this.hdMode = false;
         this.currentDrive = 0;
         this.currentSide = 0;
         this.stepDirection = 1;
