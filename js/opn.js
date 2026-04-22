@@ -1,18 +1,22 @@
 // =============================================================================
-// YM2203 (OPN) FM Sound Synthesizer
+// YM2203 (OPN) FM + SSG Sound Synthesizer
 //
 // Envelope and phase tables derived from YM2203 Application Manual
 // and Yamaha OPN/OPM technical documentation.
 //
 // Original FM synthesis engine for FM-7 Web Emulator.
-// 3 FM channels, 4 operators each, phase modulation synthesis.
-// SSG channels are handled separately by psg.js.
+// 3 FM channels (4 operators each, phase modulation synthesis) plus
+// 3 SSG channels rendered through an embedded PSGCore (psg.js).
+// FM and SSG outputs are mixed together into the OPN's AudioWorklet,
+// matching the way the real YM2203 sums both sections on a single output.
 //
 // FM synthesis internal clock = 1,228,800 Hz.
 // YM2203 external clock = 4.9152 MHz / 2 = 2,457,600 Hz on FM77AV.
 // On FM-7, CPU and OPN share the same clock domain so ratio = 1.0.
 // On FM77AV, OPN (2.4576 MHz) runs faster than CPU (2 MHz) → ratio = 1.2288.
 // =============================================================================
+
+import { PSGCore } from './psg.js';
 
 const MASTER_CLOCK  = 1228800;
 const OPN_EXT_CLOCK_AV = 2457600;   // YM2203 synthesis clock path (preserved for pitch)
@@ -1002,6 +1006,17 @@ export class OPN {
         }
         this._csmch = this._ch[2];
 
+        // Embedded SSG section. Receives YM2203 register writes 0x00-0x0F via
+        // _writeRegister() and contributes one mixed sample per OPN sample
+        // tick in _renderSamples().
+        this._ssg = new PSGCore();
+
+        // SSG mix gain into the OPN output. PSGCore._mix() returns ~±0.5
+        // for full-volume 3-channel sum; we scale that into the same int16
+        // domain as the FM path before _scaleSample() is applied. Tuned so
+        // SSG and FM are roughly balanced at maximum volume.
+        this._ssgMixGain = 16384;
+
         // F-number registers
         this._fnum = [0, 0, 0];
         this._fnum2 = new Uint8Array(6); // [0..2] = normal, [3..5] = ch3 special high
@@ -1102,6 +1117,7 @@ export class OPN {
 
     setCPUClock(hz) {
         this._cyclesPerSample = hz / SAMPLE_RATE;
+        this._ssg.setCPUClock(hz);
     }
 
     _configureRate(c, r, ip) {
@@ -1211,6 +1227,8 @@ export class OPN {
         for (let i = 0; i < 3; i++) this._rbuf[i].fill(0);
 
         this._sampleLen = 0;
+
+        this._ssg.reset();
     }
 
     // =========================================================================
@@ -1275,9 +1293,13 @@ export class OPN {
         const c = addr & 3;
 
         switch (addr) {
-            // PSG registers (0x00-0x0F) - handled externally
+            // SSG registers (0x00-0x0F) — embedded PSGCore. R14/R15 are
+            // joystick port direction/data on FM-7/77 hardware; the host
+            // (fm7.js) intercepts those for joystick handling, but mirroring
+            // them into the SSG keeps the chip register file consistent.
             case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
             case 8: case 9: case 10: case 11: case 12: case 13: case 14: case 15:
+                this._ssg._writeReg(addr, data);
                 break;
 
             case 0x24: case 0x25: case 0x26:
@@ -1435,22 +1457,32 @@ export class OPN {
         }
 
         const actch = (((ch[2].prepareForRender() << 2) | ch[1].prepareForRender()) << 2) | ch[0].prepareForRender();
+        const fmActive = !!(actch & 0x15);
+        const ssg = this._ssg;
+        const ssgGain = this._ssgMixGain;
 
-        if (actch & 0x15) {
-            for (let n = 0; n < nsamples; n++) {
+        // Always loop over all samples so the SSG advances in lock-step with
+        // the OPN sample clock, even when no FM channel is producing audio.
+        for (let n = 0; n < nsamples; n++) {
+            let fmSample = 0;
+            if (fmActive) {
                 let x = 0, y = 0, z = 0;
                 if (actch & 0x01) x = ch[0].compute();
                 if (actch & 0x04) y = ch[1].compute();
                 if (actch & 0x10) z = ch[2].compute();
+                fmSample = x + y + z;
 
-                const s = x + y + z;
                 this._rcnt = (this._rcnt + 1) & 0x1ff;
                 this._rbuf[0][this._rcnt] = x << (OUTPUT_SHIFT + 3);
                 this._rbuf[1][this._rcnt] = y << (OUTPUT_SHIFT + 3);
                 this._rbuf[2][this._rcnt] = z << (OUTPUT_SHIFT + 3);
-
-                buffer[n] += this._scaleSample(s);
             }
+
+            // SSG always renders. generateSample() advances by one output
+            // sample's worth of SSG ticks and returns a float in ±0.5 range.
+            const ssgSample = (ssg.generateSample() * ssgGain) | 0;
+
+            buffer[n] += this._scaleSample(fmSample + ssgSample);
         }
     }
 

@@ -1,17 +1,23 @@
 // =============================================================================
-// AY-3-8910 PSG Emulator for FM-7 Web Emulator
+// AY-3-8910 PSG / YM2203 SSG Emulator for FM-7 Web Emulator
 //
-// FM-7 built-in PSG mapped at $FD0D (command) / $FD0E (data).
+// Two classes are exported:
+//
+//   PSGCore — pure synthesis (registers + tone/noise/envelope + mixer).
+//             No audio output. Reusable from OPN as the SSG section.
+//   PSG     — PSGCore + AudioContext/AudioWorklet, used standalone for the
+//             FM-7 built-in PSG at $FD0D/$FD0E.
+//
+// FM-7 built-in PSG is mapped at $FD0D (command) / $FD0E (data).
 // BDIR/BC1 protocol:
 //   $03 → Address latch (data bus = register number)
 //   $02 → Data write   (data bus → latched register)
 //   $01 → Data read    (latched register → data bus)
 //   $00 → Inactive
 //
-// PSG master clock = 1.2288 MHz (same as CPU clock).
-// Tone frequency  = clock / (16 × TP)    where TP = 12-bit period
-// Noise frequency = clock / (16 × NP)    where NP = 5-bit period
-// Envelope step   = clock / (256 × EP)   where EP = 16-bit period
+// PSG master clock = 1.2288 MHz (same as the synthesis-clock convention used
+// throughout the emulator). Tone frequency = clock / (16 × TP),
+// noise frequency = clock / (16 × NP), envelope step = clock / (256 × EP).
 // =============================================================================
 
 const PSG_CLOCK     = 1228800;       // 1.2288 MHz
@@ -27,7 +33,11 @@ const VOL = new Float32Array([
     0.4556, 0.6438, 0.9098, 1.0000,
 ]);
 
-export class PSG {
+// =============================================================================
+// PSGCore — synthesis only, no audio output
+// =============================================================================
+
+export class PSGCore {
     constructor() {
         // --- Registers (R0-R15) ---
         this.regs = new Uint8Array(16);
@@ -54,19 +64,7 @@ export class PSG {
         this._envDir      = -1;          // +1 = attack, -1 = decay
         this._envHolding  = false;
 
-        // --- Audio output ---
-        this._audioCtx    = null;
-        this._workletNode = null;
-        this._gainNode    = null;
-        this._volume      = 0.5;          // Default 50%
-        // Sample staging buffer for the current step() call. Resized as
-        // needed; flushed (transferred) to the AudioWorklet at the end of
-        // each step() so the audio thread always has fresh data.
-        this._sampleBuf   = new Float32Array(2048);
-        this._sampleLen   = 0;
-
-        // --- Clock accumulator ---
-        this._accum             = 0;
+        // --- Clock ratios (synthesis-clock == 1.2288 MHz) ---
         this._ticksPerSample    = (PSG_CLOCK / CLOCK_DIV) / SAMPLE_RATE;
         this._envTicksPerSample = (PSG_CLOCK / ENV_DIV)   / SAMPLE_RATE;
         this._cpuToPsgRatio     = PSG_CLOCK / 1794000;  // default FM-7
@@ -100,9 +98,6 @@ export class PSG {
         this._envStep    = 0;
         this._envDir     = -1;
         this._envHolding = false;
-
-        this._accum = 0;
-        this._sampleLen = 0;
     }
 
     // =====================================================================
@@ -176,56 +171,8 @@ export class PSG {
     }
 
     // =====================================================================
-    // Synthesis — called from emulation loop
+    // Synthesis primitives
     // =====================================================================
-
-    /**
-     * Advance the PSG by `cpuCycles` worth of audio and fill the ring buffer.
-     * Must be called regularly from the frame loop.
-     */
-    step(cpuCycles) {
-        if (!this._audioCtx) return;
-
-        // Convert CPU cycles to PSG internal ticks (1.2288 MHz / 8)
-        this._accum += cpuCycles * this._cpuToPsgRatio / CLOCK_DIV;
-        const tps = this._ticksPerSample;
-
-        let len = this._sampleLen;
-        let buf = this._sampleBuf;
-        while (this._accum >= tps) {
-            this._accum -= tps;
-            this._advance(tps);
-            if (len >= buf.length) {
-                // Grow staging buffer (rare; emulator catches up after pause)
-                const grown = new Float32Array(buf.length * 2);
-                grown.set(buf);
-                this._sampleBuf = buf = grown;
-            }
-            buf[len++] = this._mix();
-        }
-        this._sampleLen = len;
-
-        // Flush in chunks of FLUSH_SIZE samples. step() runs per CPU
-        // instruction (hundreds of thousands of times per second) so
-        // posting on every call would saturate the message channel and
-        // cause audible crackling. 1024 samples ≈ 21ms at 48 kHz, which
-        // is a reasonable trade-off between latency and overhead.
-        if (this._workletNode) {
-            const FLUSH_SIZE = 1024;
-            while (this._sampleLen >= FLUSH_SIZE) {
-                const chunk = this._sampleBuf.slice(0, FLUSH_SIZE);
-                this._workletNode.port.postMessage(
-                    { type: 'samples', data: chunk },
-                    [chunk.buffer],
-                );
-                // Shift remaining samples down
-                this._sampleBuf.copyWithin(0, FLUSH_SIZE, this._sampleLen);
-                this._sampleLen -= FLUSH_SIZE;
-            }
-        }
-    }
-
-    // ---- Internal tick advance ----
 
     _advance(ticks) {
         // --- Tone counters ---
@@ -300,8 +247,6 @@ export class PSG {
         }
     }
 
-    // ---- Mix output ----
-
     _mix() {
         const mixer = this.regs[7];
         let out = 0;
@@ -322,6 +267,95 @@ export class PSG {
 
         // 3 channels max → scale to ≈ ±0.5
         return out * 0.25;
+    }
+
+    /**
+     * Advance the synthesis core by exactly one output sample's worth of
+     * ticks and return the mixed sample value. For embedded use (SSG inside
+     * OPN), the caller drives this once per output-rate sample so the
+     * SSG progresses in lock-step with the host's audio rate.
+     *
+     * Returns a float in roughly ±0.5 range (3-channel sum scaled by 0.25).
+     */
+    generateSample() {
+        this._advance(this._ticksPerSample);
+        return this._mix();
+    }
+}
+
+// =============================================================================
+// PSG — PSGCore + audio output (standalone FM-7 built-in PSG)
+// =============================================================================
+
+export class PSG extends PSGCore {
+    constructor() {
+        super();
+
+        // --- Audio output ---
+        this._audioCtx    = null;
+        this._workletNode = null;
+        this._gainNode    = null;
+        this._volume      = 0.5;          // Default 50%
+        // Sample staging buffer for the current step() call. Resized as
+        // needed; flushed (transferred) to the AudioWorklet at the end of
+        // each step() so the audio thread always has fresh data.
+        this._sampleBuf   = new Float32Array(2048);
+        this._sampleLen   = 0;
+
+        // --- Clock accumulator ---
+        this._accum       = 0;
+    }
+
+    reset() {
+        super.reset();
+        this._accum = 0;
+        this._sampleLen = 0;
+    }
+
+    /**
+     * Advance the PSG by `cpuCycles` worth of audio and fill the ring buffer.
+     * Must be called regularly from the frame loop.
+     */
+    step(cpuCycles) {
+        if (!this._audioCtx) return;
+
+        // Convert CPU cycles to PSG internal ticks (1.2288 MHz / 8)
+        this._accum += cpuCycles * this._cpuToPsgRatio / CLOCK_DIV;
+        const tps = this._ticksPerSample;
+
+        let len = this._sampleLen;
+        let buf = this._sampleBuf;
+        while (this._accum >= tps) {
+            this._accum -= tps;
+            this._advance(tps);
+            if (len >= buf.length) {
+                // Grow staging buffer (rare; emulator catches up after pause)
+                const grown = new Float32Array(buf.length * 2);
+                grown.set(buf);
+                this._sampleBuf = buf = grown;
+            }
+            buf[len++] = this._mix();
+        }
+        this._sampleLen = len;
+
+        // Flush in chunks of FLUSH_SIZE samples. step() runs per CPU
+        // instruction (hundreds of thousands of times per second) so
+        // posting on every call would saturate the message channel and
+        // cause audible crackling. 1024 samples ≈ 21ms at 48 kHz, which
+        // is a reasonable trade-off between latency and overhead.
+        if (this._workletNode) {
+            const FLUSH_SIZE = 1024;
+            while (this._sampleLen >= FLUSH_SIZE) {
+                const chunk = this._sampleBuf.slice(0, FLUSH_SIZE);
+                this._workletNode.port.postMessage(
+                    { type: 'samples', data: chunk },
+                    [chunk.buffer],
+                );
+                // Shift remaining samples down
+                this._sampleBuf.copyWithin(0, FLUSH_SIZE, this._sampleLen);
+                this._sampleLen -= FLUSH_SIZE;
+            }
+        }
     }
 
     // =====================================================================

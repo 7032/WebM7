@@ -587,15 +587,26 @@ button:disabled {
 .fm7-kbd-row { display: flex; gap: 1px; }
 .fm7-key {
     background: #1a2a3a; color: #8899aa; border: 1px solid #2a3a4a;
-    border-radius: 2px; font-size: 7px; width: 15px; height: 15px;
+    border-radius: 3px; font-size: 9px; width: 24px; height: 24px;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
     box-sizing: border-box;
+    padding: 0;
+    overflow: hidden;
 }
-.fm7-key.enter-wide { width: 31px; }
-.fm7-spacer { width: 15px; height: 15px; flex-shrink: 0; flex-grow: 0; }
-.fm7-key.space { flex: 1; }
+.fm7-key.enter-wide { width: 49px; }
+.fm7-spacer { width: 24px; height: 24px; flex-shrink: 0; flex-grow: 0; }
+/* SPACE: 8 cells wide (8 * 24 + 7 * 1 = 199px) so the following カナ key
+   lands at column 10 — aligned with the `/` key in the row above. */
+.fm7-key.space { width: 199px; }
 
+.fm7-key img.fm7-key-glyph {
+    width: 22px; height: 22px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    pointer-events: none;
+    display: block;
+}
 .fm7-key.active { background: #2a5a8a; color: #fff; border-color: #4ea8de; }
 .fm7-key.ctrl.active, .fm7-key.shift.active { background: #3a6a3a; border-color: #5c5; }
 .fm7-key.led { border-bottom: 2px solid #522; }
@@ -680,7 +691,7 @@ button:disabled {
     width: 336px;
 }
 #debugPanel { left: 16px;  width: 200px; }
-#keyPanel   { left: 48px; bottom: 80px; }
+#keyPanel   { left: 48px; bottom: 80px; width: 528px; }
 #palPanel   { left: 80px; bottom: 112px; width: 176px; }
 #sndPanel   { left: 112px; bottom: 144px; }
 
@@ -940,3 +951,181 @@ button:disabled {
 .screen-container:fullscreen .scanlines { border-radius: 0; }
 .screen-container:-webkit-full-screen .scanlines { border-radius: 0; }
 .screen-container:-moz-full-screen .scanlines { border-radius: 0; }
+
+/* ===== Mobile / Tablet Layout ===== */
+
+/* Mobile action bar — hidden on desktop */
+#mobileBar { display: none; }
+
+/* Drawer overlay — hidden by default */
+.drawer-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 900;
+}
+.drawer-overlay.open { display: block; }
+
+@media (max-width: 1023px), (any-pointer: coarse) {
+    body {
+        min-height: 100dvh;
+        justify-content: flex-start;
+        overscroll-behavior: contain;
+        padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+
+    .site-title {
+        font-size: 1em;
+        margin: 4px 0;
+    }
+
+    .main-layout {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 4px;
+        gap: 4px;
+    }
+
+    .left-col {
+        width: 100%;
+        flex-shrink: 1;
+    }
+
+    .screen-container {
+        padding: 4px;
+        border-width: 2px;
+        border-radius: 6px;
+    }
+    .screen-container::before {
+        top: 2px; left: 2px; right: 2px; bottom: 2px;
+        border-radius: 5px;
+        border-width: 1px;
+    }
+
+    canvas#screen {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 10;
+    }
+
+    .scanlines {
+        top: 4px; left: 4px;
+        width: calc(100% - 8px);
+        height: calc(100% - 8px);
+    }
+
+    /* Toolbar: compact */
+    .toolbar {
+        width: 100%;
+        padding: 4px 6px;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .toolbar-group { gap: 4px; }
+    .toolbar button { font-size: 0.7em; padding: 3px 6px; }
+    .vol-label { font-size: 0.65em; }
+    input[type="range"]#volumeSlider { width: 60px; }
+
+    /* Debug toolbar: hidden on mobile */
+    .toolbar-debug { display: none; }
+
+    /* Side Panel: off-screen drawer */
+    .side-panel {
+        position: fixed;
+        top: 0; left: 0;
+        width: min(320px, 85vw);
+        min-width: 0;
+        height: 100dvh;
+        max-height: 100dvh;
+        z-index: 1000;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        background: #16213e;
+        border-right: 1px solid #446;
+        padding-top: env(safe-area-inset-top, 0);
+    }
+    .side-panel.drawer-open {
+        transform: translateX(0);
+    }
+
+    /* Mobile action bar */
+    #mobileBar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        width: 100%;
+        padding: 4px 8px;
+        background: #16213e;
+        border: 1px solid #333;
+        border-radius: 6px;
+        margin-top: 4px;
+    }
+    #mobileBar button {
+        font-family: inherit;
+        font-size: 1.1em;
+        padding: 6px 14px;
+        border: 1px solid #4a5a7a;
+        border-radius: 6px;
+        cursor: pointer;
+        background: #2a3a5a;
+        color: #c8c8d0;
+        touch-action: manipulation;
+        min-width: 44px;
+        min-height: 44px;
+    }
+    #mobileBar button:active { background: #3a4a6a; }
+    #mobileBar button.active {
+        background: #0a4a2a;
+        color: #00ee77;
+        border-color: #00cc66;
+    }
+
+    /* Mobile power switch (compact replica of .power-switch) */
+    .mobile-power-switch {
+        display: inline-flex; align-items: center; gap: 3px;
+        cursor: pointer; user-select: none; flex-shrink: 0;
+    }
+    .mobile-power-switch input { display: none; }
+    .mps-label { font-size: 0.65em; font-weight: bold; line-height: 1; }
+    .mps-label:first-of-type { color: #c66; }
+    .mps-label:last-of-type { color: #565; }
+    .mobile-power-switch input:checked ~ .mps-label:first-of-type { color: #544; }
+    .mobile-power-switch input:checked ~ .mps-label:last-of-type { color: #0e7; }
+    .mps-track {
+        position: relative; display: block;
+        width: 36px; height: 18px;
+        background: linear-gradient(180deg, #111, #222 40%, #1a1a1a);
+        border: 2px solid #444; border-radius: 4px;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+        transition: border-color 0.2s;
+    }
+    .mps-knob {
+        position: absolute; top: 1px; left: 1px;
+        width: 14px; height: 14px; border-radius: 3px;
+        background: linear-gradient(180deg, #bbb, #888 40%, #999);
+        border: 1px solid #aaa;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.6);
+        transition: left 0.2s, background 0.2s;
+    }
+    .mobile-power-switch input:checked ~ .mps-track {
+        border-color: #0a5;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.6), 0 0 6px rgba(0,204,102,0.3);
+    }
+    .mobile-power-switch input:checked ~ .mps-track .mps-knob {
+        left: 19px;
+        background: linear-gradient(180deg, #5fa, #0b6 40%, #0d7);
+        border-color: #0e7;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.5), 0 0 8px rgba(0,238,119,0.5);
+    }
+
+    /* Footer: relocated into drawer via JS — shrink for panel width */
+    .footer {
+        font-size: 0.7em;
+        padding: 8px;
+        margin-top: auto;
+        border-top: 1px solid #334;
+    }
+    .footer-links { flex-wrap: wrap; gap: 4px; }
+}

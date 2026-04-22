@@ -62,8 +62,9 @@ const D77_SECTOR_HEADER_SIZE = 0x10;
 const SECTOR_SIZES = [128, 256, 512, 1024];
 
 // 2D raw image constants
-const RAW_2D_SIZE = 327680;  // 40 tracks * 16 sectors * 256 bytes * 2 sides
-const RAW_1S_SIZE = 163840;  // 40 tracks * 16 sectors * 256 bytes * 1 side
+const RAW_2D_SIZE = 327680;   // 40 tracks * 16 sectors * 256 bytes * 2 sides
+const RAW_2DD_SIZE = 655360;  // 80 tracks * 16 sectors * 256 bytes * 2 sides
+const RAW_1S_SIZE = 163840;   // 40 tracks * 16 sectors * 256 bytes * 1 side
 
 
 // =============================================================================
@@ -211,9 +212,10 @@ class D77Disk {
     }
 
     /**
-     * Parse a raw 2D disk image (no header, fixed format).
-     * 40 tracks, 16 sectors/track, 256 bytes/sector.
-     * If 327680 bytes: double-sided; if 163840 bytes: single-sided.
+     * Parse a raw 2D/2DD disk image (no header, fixed format).
+     * 16 sectors/track, 256 bytes/sector.
+     * 327680: 2D double-sided (40 tracks). 655360: 2DD double-sided (80 tracks).
+     * 163840: 2D single-sided (40 tracks).
      * @param {ArrayBuffer} buffer - The raw image data
      * @returns {boolean} true if parsing succeeded
      */
@@ -222,20 +224,25 @@ class D77Disk {
         const size = buffer.byteLength;
 
         let numSides;
+        let numTracks;
+        let mediaType;
+        let name;
         if (size === RAW_2D_SIZE) {
-            numSides = 2;
+            numSides = 2; numTracks = 40; mediaType = 0x00; name = 'RAW2D';
+        } else if (size === RAW_2DD_SIZE) {
+            numSides = 2; numTracks = 80; mediaType = 0x10; name = 'RAW2DD';
         } else if (size === RAW_1S_SIZE) {
-            numSides = 1;
+            numSides = 1; numTracks = 40; mediaType = 0x00; name = 'RAW2D';
         } else {
-            console.error(`FDC: Raw image size ${size} does not match 2D (${RAW_2D_SIZE}) or 1S (${RAW_1S_SIZE})`);
+            console.error(`FDC: Raw image size ${size} does not match 2D (${RAW_2D_SIZE}), 2DD (${RAW_2DD_SIZE}), or 1S (${RAW_1S_SIZE})`);
             return false;
         }
 
-        this.name = 'RAW2D';
+        this.name = name;
         this.writeProtect = false;
-        this.mediaType = 0x00; // 2D
+        this.mediaType = mediaType;
         this.diskSize = size;
-        this.numTracks = 40;
+        this.numTracks = numTracks;
         this.numSides = numSides;
         this.sectors = {};
 
@@ -243,7 +250,7 @@ class D77Disk {
         const sectorSize = 256;
         let pos = 0;
 
-        for (let track = 0; track < 40; track++) {
+        for (let track = 0; track < numTracks; track++) {
             this.sectors[track] = {};
             for (let side = 0; side < numSides; side++) {
                 this.sectors[track][side] = {};

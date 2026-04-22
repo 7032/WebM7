@@ -251,12 +251,12 @@ const GRPH_OVERRIDE = new Map([
     ['KeyQ', 0xFD], ['KeyW', 0xF8], ['KeyE', 0xE4], ['KeyR', 0xE5],
     ['KeyT', 0x9C], ['KeyY', 0x9D], ['KeyU', 0xF0], ['KeyI', 0xE8],
     ['KeyO', 0xE9], ['KeyP', 0x8D],
-    ['BracketLeft', 0xED], ['Enter', 0x0D],
+    ['BracketLeft', 0x8A], ['BracketRight', 0xED], ['Enter', 0x0D],
     // ASDF row
     ['KeyA', 0x95], ['KeyS', 0x96], ['KeyD', 0xE6], ['KeyF', 0xE7],
     ['KeyG', 0x9E], ['KeyH', 0x9F], ['KeyJ', 0xEA], ['KeyK', 0xEB],
     ['KeyL', 0x8E],
-    ['Semicolon', 0x99], ['Quote', 0x94], ['BracketRight', 0xEC],
+    ['Semicolon', 0x99], ['Quote', 0x94], ['IntlBackslash', 0xEC],
     // ZXCV row
     ['KeyZ', 0x80], ['KeyX', 0x81], ['KeyC', 0x82], ['KeyV', 0x83],
     ['KeyB', 0x84], ['KeyN', 0x85], ['KeyM', 0x86],
@@ -472,6 +472,63 @@ export class Keyboard {
             return this._useScanCodes ? 0x34 : 0x5F;  // _
         }
         return FM7_KEY_NONE;
+    }
+
+    // ------------------------------------------------------------------
+    // Synthetic input API (for virtual keyboard / programmatic use)
+    // ------------------------------------------------------------------
+
+    /**
+     * Simulate a key press from a virtual keyboard.
+     * Uses the same mapping tables as physical keyDown, but does not
+     * require a real KeyboardEvent.
+     *
+     * @param {string}  code    - KeyboardEvent.code string (e.g. 'KeyA', 'Enter')
+     * @param {boolean} shifted - true if Shift should be considered held
+     */
+    pressKey(code, shifted = false) {
+        if (this._heldKeys.has(code)) return; // already held
+
+        // LED toggles
+        if (code === 'CapsLock') {
+            this.capsLock = !this.capsLock;
+        } else if (code === 'Insert') {
+            this.insMode = !this.insMode;
+        } else if (code === 'AltRight' || code === 'KanaMode') {
+            this.kanaMode = !this.kanaMode;
+        } else if (code === 'AltLeft') {
+            this.graphMode = true;
+            this._heldKeys.add(code);
+            return; // GRPH is modifier-only, no key code emitted
+        }
+
+        const fm7Code = this._mapKey(code, shifted);
+        if (fm7Code === FM7_KEY_NONE) return;
+
+        this._heldKeys.add(code);
+        const mask = this._useScanCodes ? 0x7F : 0xFF;
+        this._pushKey(fm7Code & mask);
+    }
+
+    /**
+     * Simulate a key release from a virtual keyboard.
+     *
+     * @param {string} code - KeyboardEvent.code string
+     */
+    releaseKey(code) {
+        if (code === 'AltLeft') {
+            this.graphMode = false;
+        }
+
+        if (!this._heldKeys.has(code)) return;
+        this._heldKeys.delete(code);
+
+        if (this._enableBreakCodes) {
+            const fm7Code = this._mapKey(code, false);
+            if (fm7Code !== FM7_KEY_NONE) {
+                this._pushKey((fm7Code & 0x7F) | FM7_KEY_BREAK);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -728,4 +785,6 @@ export {
     FM7_KEY_F1, FM7_KEY_F2, FM7_KEY_F3, FM7_KEY_F4, FM7_KEY_F5,
     FM7_KEY_F6, FM7_KEY_F7, FM7_KEY_F8, FM7_KEY_F9, FM7_KEY_F10,
     CODE_TO_FM7_ASCII, CODE_TO_FM7_SCAN, SHIFTED_OVERRIDE,
+    GRPH_OVERRIDE, GRPH_SHIFT_OVERRIDE, GRPH_CURSOR,
+    KANA_OVERRIDE, KANA_SHIFT_OVERRIDE,
 };

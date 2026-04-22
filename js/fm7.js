@@ -137,10 +137,30 @@ export class FM7 {
         this.extsubROM   = new Uint8Array(0xC000);    // EXTSUB.ROM (48KB, AV40EX Type-D/E banks)
         this._extsubROMSize = 0;
 
-        // --- Kanji ROM (128KB level 1, accessed via $FD20-$FD23) ---
-        this.kanjiROM   = new Uint8Array(0x20000);    // 128KB, initialized to 0xFF
+        // --- AV40 Type-D/E sub RAM ---
+        this.subRAM_DE   = new Uint8Array(0x2000);    // $E000-$FFFF writable RAM (8KB)
+        this.subRAM_CG   = new Uint8Array(0x4000);    // $D800-$DFFF CG RAM (2KB x 8 banks)
+        this.subRAM_CN   = new Uint8Array(0x2000);    // $C000-$CFFF Console RAM (4KB x 2 banks)
+        this._cgramBank    = 0;                        // CG RAM bank selector (0-7, $D42E bits 0-2)
+        this._consramBank  = 0;                        // Console RAM bank (0-2, $D42E bits 3-4)
+
+        // --- Dictionary card / EXTSUB.ROM access ---
+        this._dicromBank  = 0;       // $FD2E bits 0-5: dictionary ROM bank (0-63)
+        this._dicromEn    = false;   // $FD2E bit 6: dictionary ROM enable
+        this._dicramEn    = false;   // $FD2E bit 7: learning RAM enable
+        this._extromSel   = false;   // $FD95 bit 7: extended ROM select (EXTSUB.ROM, AV40EX only)
+        this.dicromROM    = new Uint8Array(0x40000);   // DICROM.ROM (256KB, 64 banks x 4KB)
+        this.dicromROM.fill(0xFF);
+        this.dicramRAM    = new Uint8Array(0x2000);    // Learning RAM (8KB, $28000-$29FFF)
+
+        // --- Kanji ROM (128KB level 1 + 128KB level 2) ---
+        this.kanjiROM   = new Uint8Array(0x20000);    // 128KB level 1, via $FD22/$FD23
         this.kanjiROM.fill(0xFF);
-        this._kanjiAddr = 0;                           // 16-bit kanji ROM address register
+        this.kanjiROM2  = new Uint8Array(0x20000);    // 128KB level 2, via $FD2E/$FD2F (read)
+        this.kanjiROM2.fill(0xFF);
+        this._kanjiAddr = 0;                           // 16-bit kanji ROM address register (shared L1/L2)
+        this._subKanjiBank = false;                    // $D42E bit 7: sub kanji level (false=L1, true=L2)
+        this._subKanjiFlag = false;                    // $FD04 bit 5: kanji ROM connected to sub (AV40+)
 
         // --- ROM loaded flags ---
         this.romLoaded = {
@@ -154,6 +174,8 @@ export class FM7 {
             subA: false,
             subB: false,
             kanji: false,
+            kanji2: false,
+            dicrom: false,
             extsub: false,
         };
 
@@ -229,6 +251,9 @@ export class FM7 {
         this._gamepadState = new Uint8Array(2);
         this._gamepadState[0] = 0xFF;   // All buttons released (active low)
         this._gamepadState[1] = 0xFF;
+        // Per FM-7 port → browser gamepad index (navigator.getGamepads()[idx]).
+        // null = unassigned (No device). [port1, port2]
+        this._joystickAssign = [null, null];
 
         // --- PTM (MC6840 Programmable Timer Module) at $FDE0-$FDE7 ---
         // FM77AV: used for periodic timer IRQ and mouse timing.
@@ -338,7 +363,45 @@ export class FM7 {
                 // Only accessible when sub CPU is halted (returns 0xFF otherwise)
                 if (this._subHalted) {
                     const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
-                    return this._subRead(subAddr);
+                    const v = this._subRead(subAddr);
+                    if (this._dbgTraceMMR && subAddr >= 0xD400) {
+                        const pc = this.mainCPU.pc || 0;
+                        console.log(`[MMR-R] sub $${subAddr.toString(16).padStart(4,'0')}=$${v.toString(16).padStart(2,'0')} page=$${physPage.toString(16)} PC=$${pc.toString(16).padStart(4,'0')}`);
+                    }
+                    return v;
+                }
+                return 0xFF;
+            } else if ((physPage & 0xF0) === 0x20) {
+                // Pages $20-$2F: dictionary card space (日本語カード)
+                const offset = addr & 0x0FFF;
+
+                // $28000-$29FFF: Learning RAM (8KB, enabled by $FD2E bit 7)
+                if ((physPage === 0x28 || physPage === 0x29) && this._dicramEn) {
+                    const ramOff = ((physPage & 0x01) << 12) | offset;
+                    return this.dicramRAM[ramOff];
+                }
+
+                // $2E000-$2EFFF: Dictionary ROM / EXTSUB.ROM window
+                if ((physPage & 0x0F) === 0x0E && this._dicromEn) {
+                    const bankAddr = this._dicromBank << 12;
+                    if (this._extromSel) {
+                        if (this._dicromBank >= 32) {
+                            // EXTSUB.ROM: banks 32+ → extsubROM offset
+                            const extOff = (bankAddr - 0x20000) | offset;
+                            if (extOff < this._extsubROMSize) {
+                                return this.extsubROM[extOff];
+                            }
+                        }
+                        // extrom_sel + bank 0-31: KANJIN.ROM (not implemented, fall through)
+                        return 0xFF;
+                    }
+                    // DICROM.ROM: bank 0-63
+                    return this.dicromROM[(bankAddr | offset) & 0x3FFFF];
+                }
+                // Other $2x pages: extended RAM bank B (if exists)
+                const physAddr = (physPage << 12) | (addr & 0x0FFF);
+                if (physAddr < this._extRAM.length) {
+                    return this._extRAM[physAddr];
                 }
                 return 0xFF;
             } else {
@@ -373,10 +436,6 @@ export class FM7 {
 
         // $FC00-$FC7F: RAM
         if (addr >= 0xFC00 && addr < SHARED_RAM_BASE) {
-            // AV40: after F-BASIC reads $FC7D, unprotect so games can use it
-            if (addr === 0xFC7D && this._fc7dProtect) {
-                this._fc7dProtect = false;
-            }
             return this.mainRAM[addr];
         }
 
@@ -455,11 +514,38 @@ export class FM7 {
                 // Only accessible when sub CPU is halted (writes ignored otherwise)
                 if (this._subHalted) {
                     const subAddr = ((physPage & 0x0F) << 12) | (addr & 0x0FFF);
-                    this._subWrite(subAddr, val);
+                    if (this._dbgTraceMMR) {
+                        const pc = this.mainCPU.pc || 0;
+                        if (subAddr >= 0xD400) {
+                            // I/O and ROM/RAM area — always log
+                            console.log(`[MMR-W] sub $${subAddr.toString(16).padStart(4,'0')}=$${val.toString(16).padStart(2,'0')} page=$${physPage.toString(16)} PC=$${pc.toString(16).padStart(4,'0')}`);
+                        } else {
+                            // VRAM/work RAM — count only
+                            this._dbgMmrWCount = (this._dbgMmrWCount || 0) + 1;
+                            if (this._dbgMmrWCount <= 4 || (this._dbgMmrWCount & 0xFFF) === 0) {
+                                console.log(`[MMR-W] sub $${subAddr.toString(16).padStart(4,'0')}=$${val.toString(16).padStart(2,'0')} (count=${this._dbgMmrWCount}) PC=$${pc.toString(16).padStart(4,'0')}`);
+                            }
+                        }
+                    }
+                    this._subWrite(subAddr, val, true);
+                }
+                return;
+            } else if ((physPage & 0xF0) === 0x20) {
+                // Pages $20-$2F: dictionary card space
+                // $28000-$29FFF: Learning RAM write
+                if ((physPage === 0x28 || physPage === 0x29) && this._dicramEn) {
+                    const ramOff = ((physPage & 0x01) << 12) | (addr & 0x0FFF);
+                    this.dicramRAM[ramOff] = val;
+                    return;
+                }
+                // Other $2x pages: extended RAM
+                const physAddr = (physPage << 12) | (addr & 0x0FFF);
+                if (physAddr < this._extRAM.length) {
+                    this._extRAM[physAddr] = val;
                 }
                 return;
             } else {
-                // Pages 0x00-0x0F, 0x20-0x2F: extended RAM
+                // Pages 0x00-0x0F: extended RAM
                 const physAddr = (physPage << 12) | (addr & 0x0FFF);
                 if (physAddr < this._extRAM.length) {
                     this._extRAM[physAddr] = val;
@@ -476,10 +562,6 @@ export class FM7 {
 
         // $FC00-$FC7F: RAM
         if (addr < SHARED_RAM_BASE) {
-            // AV40: protect $FC7D stamp until F-BASIC reads it
-            if (addr === 0xFC7D && this.isAV40 && this._fc7dProtect) {
-                return;  // block write (INITIATE.ROM clearing the stamp)
-            }
             this.mainRAM[addr] = val;
             return;
         }
@@ -677,14 +759,14 @@ export class FM7 {
             return this.display.readPalette(addr - 0xFD38);
         }
 
-        // $FD0D: PSG command port (read)
+        // $FD0D / $FD0E:
+        //   FM-7  : standalone PSG (separate AY-3-8910 chip).
+        //   FM77AV: mirror of OPN $FD15/$FD16.
         if (addr === 0xFD0D) {
-            return this.psg.readCmd();
+            return this.isFM77AV ? 0xFF : this.psg.readCmd();
         }
-
-        // $FD0E: PSG data port (read)
         if (addr === 0xFD0E) {
-            return this.psg.readData();
+            return this.isFM77AV ? this._opnReadData() : this.psg.readData();
         }
 
         // $FD15: OPN command register — write-only (BDIR/BC1/status-read mode).
@@ -697,21 +779,7 @@ export class FM7 {
         // $FD16: OPN data bus read — dispatch on pstate
         if (addr === 0xFD16) {
             if (!this._fmCardEnabled) return 0xFF;
-            switch (this._opnPState) {
-                case 0x04: // READSTAT: live status each read
-                    return this.opn.readStatus();
-                case 0x09: { // JOYSTICK: only selreg==14 yields joystick data
-                    if (this._opnAddrLatch === 14) {
-                        const portB = this._opnRegs[0x0F] & 0xF0;
-                        if (portB === 0x20) return this._gamepadState[0];
-                        if (portB === 0x50) return this._gamepadState[1];
-                        return 0xFF;
-                    }
-                    return 0x00;
-                }
-                default: // INACTIVE / READDAT / WRITEDAT / ADDRESS → seldat
-                    return this._opnDataBus;
-            }
+            return this._opnReadData();
         }
 
         // $FD06/$FD07: RS-232C USART (not installed: return open bus)
@@ -719,12 +787,18 @@ export class FM7 {
 
         // $FD20/$FD21: Kanji ROM address register (write-only, read returns 0xFF)
         // $FD22/$FD23: Kanji ROM data (level 1)
-        //   $FD22 = ROM[kanji_addr*2 + 0] (left half byte of current row)
-        //   $FD23 = ROM[kanji_addr*2 + 1] (right half byte of current row)
-        // $FD2C-$FD2F: Kanji ROM level 2 (日本語カード, not implemented)
+        // $FD2C/$FD2D: Kanji ROM address (aliases $FD20/$FD21, AV40EX/jcard)
+        // $FD2E/$FD2F: Kanji ROM data (level 2, AV40EX/jcard)
         if (addr === 0xFD22 || addr === 0xFD23) {
+            // When kanji ROM is connected to sub CPU, main reads return 0xFF
+            if (this._subKanjiFlag) return 0xFF;
             const offset = (this._kanjiAddr << 1) + (addr & 1);
             return this.kanjiROM[offset & 0x1FFFF];
+        }
+        if ((addr === 0xFD2E || addr === 0xFD2F) && this.isAV40EX) {
+            if (this._subKanjiFlag) return 0xFF;
+            const offset = (this._kanjiAddr << 1) + (addr & 1);
+            return this.kanjiROM2[offset & 0x1FFFF];
         }
         if (addr >= 0xFD20 && addr <= 0xFD2F) return 0xFF;
 
@@ -734,8 +808,10 @@ export class FM7 {
         // $FD11: Extended sub interface (stub)
         if (addr === 0xFD11) return 0xFF;
 
-        // $FD13: Sub ROM bank read (return current Type-A/B/C, FM77AV only)
-        if (addr === FD13_SUB_BANK && this.isFM77AV) return this._subMonitorType & 0x03;
+        // $FD13: Sub ROM bank read (write-only register, return last written value)
+        if (addr === FD13_SUB_BANK && this.isFM77AV) {
+            return this._subMonitorType >= 4 ? 0x04 : (this._subMonitorType & 0x03);
+        }
 
         // $FD14: Extended register (stub)
         if (addr === 0xFD14) return 0xFF;
@@ -872,15 +948,6 @@ export class FM7 {
             if (this._loadTraceEnabled && this._basicRomEnabled) {
                 this._loadTrace.push({ t: 'ROM_OFF', pc: this.mainCPU.pc });
             }
-            if (this._basicRomEnabled) {
-                console.log(`[ROM] BASIC ROM DISABLED (write $FD0F) at PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
-            }
-            // AV40: stamp $FC7D only on FIRST BASIC ROM disable (boot).
-            // Games also write $FD0F but must not trigger the stamp/protect.
-            if (this.isAV40 && this._basicRomEnabled) {
-                this.mainRAM[0xFC7D] = 0x0D;
-                this._fc7dProtect = true;
-            }
             this._basicRomEnabled = false;
             return;
         }
@@ -939,18 +1006,12 @@ export class FM7 {
 
         // FM77AV: $FD13 write - Sub ROM bank switch + Sub CPU reset
         // bit 1-0: subrom_bank (0=Type-C, 1=Type-A, 2=Type-B)
-        // AV40EX/SX: bit 2: extended bank select (Type-D/E from EXTSUB.ROM)
-        // AV40 (non-EX): bit 2 ignored (Type-D/E loaded from disk to RAM by F-BASIC)
+        // AV40/AV40EX: bit 2: Type-D/E (sub RAM mode, bits 1-0 ignored)
         // Writing triggers sub CPU reset
         if (addr === FD13_SUB_BANK && this.isFM77AV) {
             let bank = val & 0x03;
-            if (this.isAV40EX && (val & 0x04)) {
-                if (this.romLoaded.extsub) {
-                    bank = 4 + (val & 0x03);
-                } else {
-                    console.log(`[FD13] val=$${val.toString(16)} extBank=${(val & 0x03) + 4} → fallback Type-A (no EXTSUB) PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()}`);
-                    bank = SUB_MONITOR_A;
-                }
+            if (this.isAV40 && (val & 0x04)) {
+                bank = 4; // Type-D/E: RAM mode, bits 1-0 ignored
             }
             const oldType = this._subMonitorType;
             this._subMonitorType = bank;
@@ -971,7 +1032,7 @@ export class FM7 {
                 this._applyFD13DisplayReset();
                 if (oldType !== bank) {
                     console.log('FM77AV: Sub ROM bank → Type-' +
-                        (['C', 'A', 'B', 'CG'][bank] || `D${bank - 4}`) + ' (deferred, sub halted)');
+                        (['C', 'A', 'B', 'CG', 'D/E(RAM)'][bank] || bank) + ' (deferred, sub halted)');
                 }
                 return;
             }
@@ -984,7 +1045,7 @@ export class FM7 {
             this.scheduler.setSubHalted(false);
             if (oldType !== bank) {
                 console.log('FM77AV: Sub ROM bank → Type-' +
-                    (['C', 'A', 'B', 'CG'][bank] || `D${bank - 4}`) + ', sub CPU reset');
+                    (['C', 'A', 'B', 'CG', 'D/E(RAM)'][bank] || bank) + ', sub CPU reset');
             }
             return;
         }
@@ -1062,90 +1123,90 @@ export class FM7 {
             return;
         }
 
-        // $FD0D: PSG command port (write)
+        // $FD0D / $FD0E:
+        //   FM-7  : standalone built-in PSG (AY-3-8910), separate from OPN.
+        //   FM77AV: physical mirror of OPN command/data ($FD15/$FD16).
+        //           Real hardware has no separate PSG chip — the YM2203 SSG
+        //           section answers both address pairs.
         if (addr === 0xFD0D) {
-            this.psg.writeCmd(val);
-            return;
-        }
-
-        // $FD0E: PSG data port (write)
-        if (addr === 0xFD0E) {
-            this.psg.writeData(val);
-            return;
-        }
-
-        // $FD15: OPN command register — 4-bit enum decode
-        if (addr === 0xFD15 && !this._fmCardEnabled) return;
-        if (addr === 0xFD15) {
-            const cmd = val & 0x0F;
-            switch (cmd) {
-                case 0x00: // INACTIVE
-                    this._opnPState = 0x00;
-                    break;
-                case 0x01: // READDAT: seldat ← regs[selreg]
-                    this._opnPState = 0x01;
-                    this._opnDataBus = this._opnRegs[this._opnAddrLatch] & 0xFF;
-                    break;
-                case 0x02: { // WRITEDAT: writereg(selreg, seldat)
-                    this._opnPState = 0x02;
-                    const reg = this._opnAddrLatch;
-                    const dat = this._opnDataBus & 0xFF;
-                    this.opn.writeReg(reg, dat);
-                    this._opnRegs[reg] = dat;
-                    if (reg <= 0x0F) this.psg._writeReg(reg, dat);
-                    break;
-                }
-                case 0x03: { // ADDRESS: selreg ← seldat; prescaler regs self-trigger
-                    this._opnPState = 0x03;
-                    this._opnAddrLatch = this._opnDataBus & 0xFF;
-                    const r = this._opnAddrLatch;
-                    if (r >= 0x2D && r <= 0x2F) {
-                        this._opnDataBus = 0;
-                        this.opn.writeReg(r, 0);
-                        this._opnRegs[r] = 0;
-                    }
-                    break;
-                }
-                case 0x04: // READSTAT
-                    this._opnPState = 0x04;
-                    break;
-                case 0x09: // JOYSTICK
-                    this._opnPState = 0x09;
-                    break;
-                // other codes: ignored (pstate unchanged)
+            if (this.isFM77AV) {
+                this._opnWriteCmd(val);
+            } else {
+                this.psg.writeCmd(val);
             }
+            return;
+        }
+        if (addr === 0xFD0E) {
+            if (this.isFM77AV) {
+                this._opnWriteData(val);
+            } else {
+                this.psg.writeData(val);
+            }
+            return;
+        }
+
+        // $FD15: OPN command register — 4-bit enum decode (FM card / FM77AV).
+        if (addr === 0xFD15) {
+            if (this._fmCardEnabled) this._opnWriteCmd(val);
             return;
         }
 
         // $FD16: OPN data bus write
         if (addr === 0xFD16) {
-            if (!this._fmCardEnabled) return;
-            this._opnDataBus = val & 0xFF;
+            if (this._fmCardEnabled) this._opnWriteData(val);
             return;
         }
 
         // $FD00: Keyboard port write (no-op, read-only register)
         if (addr === 0xFD00) return;
 
-        // $FD04: Main CPU side — no-op on FM-7/FM77AV/AV40.
-        // Mode control ($D404) is sub CPU only (handled in _subWrite).
-        if (addr === 0xFD04 && this.isFM77AV) {
+        // $FD04: Main CPU side — AV40 display mode control
+        // bit 2: sub-RAM write protect (0=protect, 1=unprotect)
+        // bit 3: 400-line mode (0=enable, 1=disable)
+        // bit 4: 262,144-color mode (1=enable, only when bit3=1)
+        if (addr === 0xFD04) {
+            if (this.isAV40) {
+                this._subramProtect = !(val & 0x04);
+                this._subKanjiFlag = !(val & 0x20); // bit 5: kanji ROM → sub (0=connect)
+                const mode400l = !(val & 0x08);
+                const mode256k = ((val & 0x10) !== 0) && !mode400l;
+
+                let newMode;
+                if (mode400l) {
+                    newMode = 3; // DISPLAY_MODE_400
+                } else if (mode256k) {
+                    newMode = 2; // DISPLAY_MODE_262K
+                } else if (this.display.displayMode === 2 || this.display.displayMode === 3) {
+                    newMode = this.display._mode320Flag ? 1 : 0;
+                } else {
+                    newMode = this.display.displayMode;
+                }
+                if (newMode !== this.display.displayMode) {
+                    this.display._setDisplayMode(newMode);
+                }
+            }
             return;
         }
 
         // $FD06/$FD07: RS-232C USART write (stub: no device)
         if (addr === 0xFD06 || addr === 0xFD07) return;
 
-        // $FD20: Kanji ROM address high byte write
-        // $FD21: Kanji ROM address low byte write
-        // $FD22/$FD23: data (read-only, writes ignored)
-        // $FD2C-$FD2F: level 2 (not implemented)
-        if (addr === 0xFD20) {
+        // $FD20/$FD2C: Kanji ROM address high byte write (shared register)
+        // $FD21/$FD2D: Kanji ROM address low byte write (shared register)
+        // $FD22/$FD23: level 1 data (read-only), $FD2E/$FD2F: level 2 data (read-only)
+        // $FD2E write: Dictionary card bank select (AV40EX built-in)
+        if (addr === 0xFD20 || (addr === 0xFD2C && this.isAV40EX)) {
             this._kanjiAddr = (this._kanjiAddr & 0x00FF) | (val << 8);
             return;
         }
-        if (addr === 0xFD21) {
+        if (addr === 0xFD21 || (addr === 0xFD2D && this.isAV40EX)) {
             this._kanjiAddr = (this._kanjiAddr & 0xFF00) | val;
+            return;
+        }
+        if (addr === 0xFD2E && this.isAV40EX) {
+            this._dicramEn = !!(val & 0x80);
+            this._dicromEn = !!(val & 0x40);
+            this._dicromBank = val & 0x3F;
             return;
         }
         if (addr >= 0xFD20 && addr <= 0xFD2F) return;
@@ -1179,13 +1240,9 @@ export class FM7 {
             // $FD93: MMR/TWR control register
             // bit 7: MMR enable, bit 6: TWR enable
             if (addr === FD93_MMR_CTRL) {
-                const prevTwr = this._twrFlag;
                 this._mmrEnabled = (val & 0x80) !== 0;
                 this._twrFlag = (val & 0x40) !== 0;
                 this._bootramRW = (val & 0x01) !== 0;
-                if (this._twrFlag && !prevTwr) {
-                    console.log(`[TWR] ENABLED by $FD93=$${val.toString(16)} at PC=$${(this.mainCPU.pc||0).toString(16).toUpperCase()} twrReg=$${this._twrReg.toString(16)}`);
-                }
                 return;
             }
             // $FD90: MMR bank select register (selects which bank for $FD80-$FD8F AND address translation)
@@ -1210,7 +1267,16 @@ export class FM7 {
                 // bit2: refresh speed, bit0: window speed — no effect in emulator
                 return;
             }
-            // $FD95: Mode select 2 (AV20EX/AV40EX only — NOP on AV40)
+            // $FD95: Mode select 2 (AV40EX: bit7=extrom_sel)
+            if (addr === 0xFD95) {
+                if (this.isAV40EX) {
+                    this._extromSel = !!(val & 0x80);
+                    if (this._dbgTraceMMR) {
+                        console.log(`[FD95] val=$${val.toString(16).padStart(2,'0')} extromSel=${this._extromSel}`);
+                    }
+                }
+                return;
+            }
             // $FD9A-$FD9F: extended RAM probe / MR2 — NOP (no hardware)
             return;
         }
@@ -1258,6 +1324,12 @@ export class FM7 {
     _subRead(addr) {
         addr &= 0xFFFF;
 
+        // AV40 Console RAM: $C000-$CFFF when Type-D/E + consram_bank >= 1
+        if (addr >= 0xC000 && addr < 0xD000 &&
+            this._subMonitorType >= 4 && this._consramBank >= 1) {
+            return this.subRAM_CN[(this._consramBank - 1) * 0x1000 + (addr - 0xC000)];
+        }
+
         // $0000-$BFFF: VRAM (48KB) + $C000-$D37F: Work RAM
         if (addr < 0xD380) {
             return this.display.read(addr);
@@ -1288,6 +1360,16 @@ export class FM7 {
                 return this.keyboard.readIO(0xFD01);
             }
 
+            // $D406/$D407: Sub-side kanji ROM read (AV40/AV40EX only)
+            if ((ioAddr === 0xD406 || ioAddr === 0xD407) && this.isAV40) {
+                if (!this._subKanjiFlag) return 0xFF; // not connected to sub
+                const offset = (this._kanjiAddr << 1) + (ioAddr & 1);
+                if (this._subKanjiBank) {
+                    return this.kanjiROM2[offset & 0x1FFFF];
+                }
+                return this.kanjiROM[offset & 0x1FFFF];
+            }
+
             // Display/control I/O ($D402-$D40F)
             const result = this.display.readIO(ioAddr);
 
@@ -1306,9 +1388,14 @@ export class FM7 {
                 // $D403: Sub CPU BEEP trigger (single 205ms tone)
                 this._beepStart(205);
             } else if (result.sideEffect === 'busyOff') {
-                // $D40A: Clear BUSY flag
+                // $D40A read: Clear BUSY flag, return cancel status
+                // bit 7: cancel flag (1=cancel active, 0=no cancel)
+                const wasBusy = this._subBusy;
                 this._subBusy = false;
                 this._subBusyWasCleared = true;
+                // Return cancel flag in bit 7, other bits=1
+                const cancelBit = this._subCancel ? 0x80 : 0x00;
+                return 0x7F | cancelBit;
             }
 
             return result.value;
@@ -1390,12 +1477,16 @@ export class FM7 {
             return this._subRead(0xD400 + ((addr - 0xD400) & 0x0F));
         }
 
-        // $D800-$DFFF: CG ROM (FM77AV) or Sub ROM (FM-7)
+        // $D800-$DFFF: CG ROM/RAM (FM77AV) or Sub ROM (FM-7)
         if (addr < SUB_ROM_AV_BASE) {
             if (this.isFM77AV) {
                 // Type-C: use sub ROM (FM-7 compatible)
                 if (this._subMonitorType === SUB_MONITOR_C) {
                     return this.subROM[addr - SUB_ROM_BASE];
+                }
+                // Type-D/E: CG RAM (banked, writable)
+                if (this._subMonitorType >= 4) {
+                    return this.subRAM_CG[this._cgramBank * 0x0800 + (addr - 0xD800)];
                 }
                 // Type-A/B: CG ROM with bank switching
                 const cgAddr = this._cgRomBank * 0x0800 + (addr - 0xD800);
@@ -1414,14 +1505,9 @@ export class FM7 {
             if (this._subMonitorType === SUB_MONITOR_C) {
                 return this.subROM[addr - SUB_ROM_BASE];
             }
-            // Extended banks (Type-D/E from EXTSUB.ROM, AV40EX only)
+            // Type-D/E: sub RAM (writable, loaded by F-BASIC from disk)
             if (this._subMonitorType >= 4) {
-                const extBank = this._subMonitorType - 4;
-                const offset = extBank * 0x2000 + (addr - SUB_ROM_AV_BASE);
-                if (offset < this.extsubROM.length) {
-                    return this.extsubROM[offset];
-                }
-                return 0xFF;
+                return this.subRAM_DE[addr - SUB_ROM_AV_BASE];
             }
             // Type-A or Type-B
             const rom = (this._subMonitorType === SUB_MONITOR_A) ? this.subROM_A : this.subROM_B;
@@ -1445,9 +1531,16 @@ export class FM7 {
     // Sub CPU Memory Write ($0000-$FFFF)
     // =========================================================================
 
-    _subWrite(addr, val) {
+    _subWrite(addr, val, fromMain = false) {
         addr &= 0xFFFF;
         val &= 0xFF;
+
+        // AV40 Console RAM: $C000-$CFFF when Type-D/E + consram_bank >= 1
+        if (addr >= 0xC000 && addr < 0xD000 &&
+            this._subMonitorType >= 4 && this._consramBank >= 1) {
+            this.subRAM_CN[(this._consramBank - 1) * 0x1000 + (addr - 0xC000)] = val;
+            return;
+        }
 
         // $0000-$BFFF: VRAM + $C000-$D37F: Work RAM
         if (addr < 0xD380) {
@@ -1466,6 +1559,11 @@ export class FM7 {
         // $D400-$D40F: Sub CPU I/O
         if (addr <= 0xD40F) {
             const ioAddr = 0xD400 + ((addr - 0xD400) & 0x0F);
+
+            // Trace all sub I/O writes when Type-D/E active
+            if (this._subMonitorType >= 4 && this._dbgTraceMMR) {
+                console.log(`[SUB-IOW] $${ioAddr.toString(16)}=$${val.toString(16).padStart(2,'0')} PC=$${this.subCPU.pc.toString(16).padStart(4,'0')}`);
+            }
 
             // Keyboard ($D400-$D401) - writes ignored
             if (ioAddr <= 0xD401) return;
@@ -1500,6 +1598,17 @@ export class FM7 {
                 return;
             }
 
+            // $D406/$D407: Sub-side kanji ROM address write (AV40/AV40EX only)
+            // $D406 write: kanji_addr high byte, $D407 write: kanji_addr low byte
+            if ((ioAddr === 0xD406 || ioAddr === 0xD407) && this.isAV40) {
+                if (ioAddr & 1) {
+                    this._kanjiAddr = (this._kanjiAddr & 0xFF00) | val;
+                } else {
+                    this._kanjiAddr = (this._kanjiAddr & 0x00FF) | (val << 8);
+                }
+                return;
+            }
+
             // Display/control I/O
             const result = this.display.writeIO(ioAddr, val);
 
@@ -1514,6 +1623,10 @@ export class FM7 {
 
         // FM77AV: $D410-$D4FF I/O area
         if (this.isFM77AV && addr >= 0xD410 && addr < 0xD500) {
+            // Trace all AV I/O writes when Type-D/E active
+            if (this._subMonitorType >= 4 && this._dbgTraceMMR) {
+                console.log(`[SUB-IOW] $${addr.toString(16)}=$${val.toString(16).padStart(2,'0')} PC=$${this.subCPU.pc.toString(16).padStart(4,'0')}`);
+            }
             // $D440-$D4FF: Mirror to $D400-$D43F (6-bit mask)
             if (addr >= 0xD440) {
                 this._subWrite(0xD400 + ((addr - 0xD400) & 0x3F), val);
@@ -1526,6 +1639,14 @@ export class FM7 {
             }
             // $D42C-$D42F: Additional FM77AV registers
             if (addr <= 0xD42F) {
+                // $D42E: AV40 sub RAM bank select / sub kanji ROM select
+                if (addr === 0xD42E && this.isAV40) {
+                    this._cgramBank = val & 0x07;       // bits 0-2: CG RAM bank
+                    this._consramBank = (val >> 3) & 0x03; // bits 3-4: console RAM bank
+                    if (this._consramBank >= 3) this._consramBank = 0;
+                    this._subKanjiBank = !!(val & 0x80); // bit 7: level 1/2 select
+                    return;
+                }
                 this.display.writeIO(addr, val);
                 return;
             }
@@ -1588,7 +1709,23 @@ export class FM7 {
             return;
         }
 
-        // $D800-$FFFF: ROM area, writes are ignored
+        // $D800-$FFFF: ROM area (writes ignored) or Type-D/E sub RAM (writable)
+        if (this._subMonitorType >= 4) {
+            // subramProtect blocks sub CPU writes only; main CPU MMR bypasses protect
+            if (this._subramProtect && !fromMain) {
+                if (this._dbgTraceMMR) {
+                    console.log(`[PROTECT] sub $${addr.toString(16).padStart(4,'0')}=$${val.toString(16).padStart(2,'0')} BLOCKED by subramProtect`);
+                }
+                return; // protected
+            }
+            if (addr < SUB_ROM_AV_BASE) {
+                // $D800-$DFFF: CG RAM (banked)
+                this.subRAM_CG[this._cgramBank * 0x0800 + (addr - 0xD800)] = val;
+            } else {
+                // $E000-$FFFF: sub RAM
+                this.subRAM_DE[addr - SUB_ROM_AV_BASE] = val;
+            }
+        }
     }
 
     // =========================================================================
@@ -1937,6 +2074,13 @@ export class FM7 {
         this.display.vramaFlag = false;
         this.display.activeVramPage = 0;
         this.display.displayVramPage = 0;
+        // Reset display mode: 400-line / 262K → restore to 200-line mode
+        // But NOT when entering Type-D/E — $FD04 sets 400-line before $FD13
+        if (this.display.displayMode >= 2 && this._subMonitorType < 4) {
+            const newMode = this.display._mode320Flag ? 1 : 0;
+            this.display._setDisplayMode(newMode);
+        }
+        this.display.subramVramBank = 0;
         this._nmiMaskSub = false;
         this._vsyncFlag = false;
         this._blankFlag = true;
@@ -1952,6 +2096,9 @@ export class FM7 {
                 this._subBusy = true;
                 this._subBusyWasCleared = false;
                 this.scheduler.setSubHalted(true);
+                if (this._dbgTraceMMR) {
+                    console.log(`[HALT] Sub CPU halted, PC=$${(this.subCPU.pc||0).toString(16).padStart(4,'0')} monType=${this._subMonitorType}`);
+                }
                 // Save sub CPU's view of $D430 state at halt time.
                 // Main CPU MMR writes to $D430 during halt may otherwise
                 // change apg from under the sub CPU's feet, causing it to
@@ -1972,6 +2119,9 @@ export class FM7 {
                     this.display._setActiveVramPage(this._haltSavedActivePage);
                     this.display._setDisplayVramPage(this._haltSavedDisplayPage);
                     this._haltSavedActivePage = undefined;
+                }
+                if (this._dbgTraceMMR) {
+                    console.log(`[UNHALT] Sub CPU released, monType=${this._subMonitorType} protect=${this._subramProtect} deferred=${this._subResetDeferred}`);
                 }
                 // Apply deferred $FD13 reset on HALT release
                 if (this._subResetDeferred) {
@@ -2044,6 +2194,23 @@ export class FM7 {
         };
         document.addEventListener('keydown', this._keyDownHandler);
         document.addEventListener('keyup', this._keyUpHandler);
+    }
+
+    /**
+     * Simulate BREAK key press (for virtual keyboard).
+     * Asserts main CPU FIRQ, same as physical BREAK key.
+     */
+    pressBreak() {
+        this._breakKey = true;
+        this.mainRAM[0x0313] = 0xFF;
+        this.mainCPU.firq();
+    }
+
+    /**
+     * Simulate BREAK key release (for virtual keyboard).
+     */
+    releaseBreak() {
+        this._breakKey = false;
     }
 
     // =========================================================================
@@ -2184,26 +2351,6 @@ export class FM7 {
     }
 
     /**
-     * Apply in-memory compatibility adjustment to the user-supplied
-     * Initiator ROM so that FM77AV mode runs regardless of the specific
-     * hardware variant the ROM originates from. The original ROM file
-     * is not modified.
-     */
-    _patchInitiatorToAV() {
-        const rom = this.initiateROM;
-        let adjusted = false;
-        if (rom[0x0B0E] !== 0xFF) {
-            for (let i = 0x0B0E; i <= 0x0B13; i++) {
-                rom[i] = 0xFF;
-            }
-            adjusted = true;
-        }
-        if (adjusted) {
-            console.log('Initiator ROM: in-memory compatibility adjustment applied');
-        }
-    }
-
-    /**
      * Load Sub-system Type-A ROM (FM77AV, 8KB)
      * @param {ArrayBuffer} data
      */
@@ -2233,6 +2380,24 @@ export class FM7 {
      * Load EXTSUB.ROM (FM77AV40EX/SX, 48KB — extended sub ROM banks Type-D/E)
      * @param {ArrayBuffer} data
      */
+    loadKanji2ROM(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.kanjiROM2.length);
+        this.kanjiROM2.fill(0xFF);
+        this.kanjiROM2.set(src.subarray(0, len));
+        this.romLoaded.kanji2 = true;
+        console.log(`Kanji2 ROM loaded: ${len} bytes`);
+    }
+
+    loadDicromROM(data) {
+        const src = new Uint8Array(data);
+        const len = Math.min(src.length, this.dicromROM.length);
+        this.dicromROM.fill(0xFF);
+        this.dicromROM.set(src.subarray(0, len));
+        this.romLoaded.dicrom = true;
+        console.log(`DICROM loaded: ${len} bytes (${Math.floor(len / 0x1000)} banks)`);
+    }
+
     loadExtSubROM(data) {
         const src = new Uint8Array(data);
         const len = Math.min(src.length, this.extsubROM.length);
@@ -2297,6 +2462,81 @@ export class FM7 {
      */
     setFMCard(enabled) {
         this._fmCardEnabled = enabled || this.isFM77AV;
+    }
+
+    // =========================================================================
+    // OPN bus helpers
+    //
+    // The YM2203 talks to the CPU through a 4-bit BDIR/BC1/etc. enum on its
+    // command port. fm7.js owns the protocol latches (selreg / seldat /
+    // pstate) and forwards register transactions to the OPN object. These
+    // helpers exist so both $FD15/$FD16 (FM-7 card / FM77AV) and $FD0D/$FD0E
+    // (FM77AV mirror) can dispatch through the same logic without duplicating
+    // the case table.
+    // =========================================================================
+
+    /** OPN command port write — dispatches the 4-bit BDIR/BC1 enum. */
+    _opnWriteCmd(val) {
+        const cmd = val & 0x0F;
+        switch (cmd) {
+            case 0x00: // INACTIVE
+                this._opnPState = 0x00;
+                break;
+            case 0x01: // READDAT: seldat ← regs[selreg]
+                this._opnPState = 0x01;
+                this._opnDataBus = this._opnRegs[this._opnAddrLatch] & 0xFF;
+                break;
+            case 0x02: { // WRITEDAT: writereg(selreg, seldat)
+                this._opnPState = 0x02;
+                const reg = this._opnAddrLatch;
+                const dat = this._opnDataBus & 0xFF;
+                this.opn.writeReg(reg, dat);
+                this._opnRegs[reg] = dat;
+                break;
+            }
+            case 0x03: { // ADDRESS: selreg ← seldat; prescaler regs self-trigger
+                this._opnPState = 0x03;
+                this._opnAddrLatch = this._opnDataBus & 0xFF;
+                const r = this._opnAddrLatch;
+                if (r >= 0x2D && r <= 0x2F) {
+                    this._opnDataBus = 0;
+                    this.opn.writeReg(r, 0);
+                    this._opnRegs[r] = 0;
+                }
+                break;
+            }
+            case 0x04: // READSTAT
+                this._opnPState = 0x04;
+                break;
+            case 0x09: // JOYSTICK
+                this._opnPState = 0x09;
+                break;
+            // other codes: ignored (pstate unchanged)
+        }
+    }
+
+    /** OPN data port write — latches into seldat for the next WRITEDAT. */
+    _opnWriteData(val) {
+        this._opnDataBus = val & 0xFF;
+    }
+
+    /** OPN data port read — dispatches on pstate (status / joystick / data). */
+    _opnReadData() {
+        switch (this._opnPState) {
+            case 0x04: // READSTAT: live status each read
+                return this.opn.readStatus();
+            case 0x09: { // JOYSTICK: only selreg==14 yields joystick data
+                if (this._opnAddrLatch === 14) {
+                    const portB = this._opnRegs[0x0F] & 0xF0;
+                    if (portB === 0x20) return this._gamepadState[0];
+                    if (portB === 0x50) return this._gamepadState[1];
+                    return 0xFF;
+                }
+                return 0x00;
+            }
+            default: // INACTIVE / READDAT / WRITEDAT / ADDRESS → seldat
+                return this._opnDataBus;
+        }
     }
 
     // =========================================================================
@@ -2543,7 +2783,6 @@ export class FM7 {
         // IPL/game code disables it via write to $FD0F when needed.
         this._basicRomEnabled = true;
         this._fbasicWarnShown = false;
-        this._fc7dProtect = false;
 
         // Reset OPN state
         this._opnAddrLatch = 0;
@@ -2555,11 +2794,7 @@ export class FM7 {
 
         // FM77AV specific reset
         if (this.isFM77AV) {
-            // Apply in-memory compatibility adjustment (non-AV40 only).
-            if (this._initiateROMSize > 0x0B13 && !this.isAV40) {
-                this._patchInitiatorToAV();
-            }
-            this._initiatorActive = false; // Initiator ROM bypassed — start disabled
+            this._initiatorActive = false; // Set before boot path logic overrides it
             this._initiatorHandoffDone = false;
             // Sub monitor type after reset is always Type-C (subrom_bank=0).
             // The IPL/game then switches via $FD13 if it needs Type-A/B.
@@ -2584,6 +2819,17 @@ export class FM7 {
             // AV40 sub-interface extension
             this._subramProtect = true;    // Sub RAM protected at reset
             this._subKanjiConnect = false; // Kanji ROM disconnected at reset
+            this._cgramBank = 0;
+            this._consramBank = 0;
+            this.subRAM_DE.fill(0);
+            this.subRAM_CG.fill(0);
+            this.subRAM_CN.fill(0);
+            this._dicromBank = 0;
+            this._dicromEn = false;
+            this._dicramEn = false;
+            this._extromSel = false;
+            this._subKanjiBank = false;
+            this._subKanjiFlag = false;
             // AV40 peripheral stubs
             this._dmacReg = 0;
             this._dmacRegs.fill(0);
@@ -2701,6 +2947,7 @@ export class FM7 {
                 console.error('[BOOT] FM77AV requires INITIATE.ROM. Falling back to bypass for compatibility.');
                 mainPC = (bootMode === 'dos') ? this._dosBootDirect() : this._basicBootBypass();
             } else {
+                this._patchInitiateROM();
                 this._initiatorActive = true;
                 mainPC = 0x6000; // INITIATE.ROM entry (mirrored at $FFFE-$FFFF)
                 initiatorPath = true;
@@ -2731,7 +2978,7 @@ export class FM7 {
         console.log(`${this._machineType.toUpperCase()} reset (boot: ${bootMode}, ${initiatorPath ? 'INITIATE.ROM' : 'bypass'})`);
         console.log(`  Main CPU PC: $${mainPC.toString(16).toUpperCase().padStart(4, '0')}`);
         console.log(`  Initiator: ${initiatorPath ? 'ACTIVE (executing)' : 'BYPASSED'}, ROM loaded: ${this.romLoaded.initiate}`);
-        console.log(`  Sub monitor: Type-${['C','A','B'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
+        console.log(`  Sub monitor: Type-${['C','A','B','CG','D/E'][this._subMonitorType]}, ROM loaded: A=${this.romLoaded.subA} B=${this.romLoaded.subB} C=${this.romLoaded.sub}`);
         console.log(`  Disk in drive 0: ${hasDisk ? 'YES' : 'NO'}, BASIC ROM: ${this.romLoaded.fbasic ? 'YES' : 'NO'}`);
         const srvHi = this._subRead(0xFFFE);
         const srvLo = this._subRead(0xFFFF);
@@ -2767,6 +3014,76 @@ export class FM7 {
         const coldStart = (hi << 8) | lo;
         console.log(`[BOOT] BASIC bypass: cold start = $${coldStart.toString(16).toUpperCase().padStart(4, '0')}`);
         return coldStart;
+    }
+
+    /**
+     * Patch INITIATE.ROM for the current machine type.
+     * Real hardware has model-specific INITIATE.ROM; emulators share one ROM
+     * and patch the hardware version string + boot path branching.
+     *
+     * Offset $0B0E (6 bytes): hardware version string
+     *   FM77AV   → $FF fill (original AV, no version string)
+     *   AV40     → "400Ma."
+     *   AV40EX   → "401Ma."
+     *
+     * Search-based patches (first $B00 bytes):
+     *   BRA $D7 (bytes $20 $D7) → NEW BOOT copy branch
+     *     FM77AV: $21 (BRN = skip) — AV has no NEW BOOT
+     *     Others: $20 (BRA = copy NEW BOOT)
+     *   JMP $5000 (bytes $7E $50 $00) → trampoline target
+     *     FM77AV: JMP $FE00 (OLD BOOT entry)
+     *     Others: JMP $5000 (NEW BOOT entry)
+     */
+    _patchInitiateROM() {
+        const rom = this.initiateROM;
+        if (!this.romLoaded.initiate || this._initiateROMSize < 0x0B14) return;
+
+        // --- Version string at offset $0B0E ---
+        switch (this._machineType) {
+            case MACHINE_FM77AV:
+                rom.fill(0xFF, 0x0B0E, 0x0B14);
+                break;
+            case MACHINE_FM77AV40:
+                rom[0x0B0E] = 0x34; // '4'
+                rom[0x0B0F] = 0x30; // '0'
+                rom[0x0B10] = 0x30; // '0'
+                rom[0x0B11] = 0x4D; // 'M'
+                rom[0x0B12] = 0x61; // 'a'
+                rom[0x0B13] = 0x2E; // '.'
+                break;
+            case MACHINE_FM77AV40EX:
+                rom[0x0B0E] = 0x34; // '4'
+                rom[0x0B0F] = 0x30; // '0'
+                rom[0x0B10] = 0x31; // '1'
+                rom[0x0B11] = 0x4D; // 'M'
+                rom[0x0B12] = 0x61; // 'a'
+                rom[0x0B13] = 0x2E; // '.'
+                break;
+        }
+
+        // --- Search-based boot path patches (first $B00 bytes) ---
+        // Search for BRA/BRN $D7 (either $20 or $21 with offset $D7)
+        // and JMP $5000/$FE00 (either target, from previous patch)
+        let foundBRA = false, foundJMP = false;
+        for (let i = 0; i < 0xB00 && !(foundBRA && foundJMP); i++) {
+            if (!foundBRA && (rom[i] === 0x20 || rom[i] === 0x21) && rom[i + 1] === 0xD7) {
+                rom[i] = (this._machineType === MACHINE_FM77AV) ? 0x21 : 0x20;
+                foundBRA = true;
+            }
+            if (!foundJMP && rom[i] === 0x7E &&
+                ((rom[i + 1] === 0x50 && rom[i + 2] === 0x00) ||
+                 (rom[i + 1] === 0xFE && rom[i + 2] === 0x00))) {
+                if (this._machineType === MACHINE_FM77AV) {
+                    rom[i + 1] = 0xFE; rom[i + 2] = 0x00;
+                } else {
+                    rom[i + 1] = 0x50; rom[i + 2] = 0x00;
+                }
+                foundJMP = true;
+            }
+        }
+
+        const verStr = String.fromCharCode(...rom.slice(0x0B0E, 0x0B14));
+        console.log(`[BOOT] INITIATE.ROM patched: ver="${verStr}" BRA=${foundBRA} JMP=${foundJMP} (${this._machineType})`);
     }
 
     /**
@@ -3163,7 +3480,7 @@ export class FM7 {
         console.log(`  activeVramPage: ${d.activeVramPage}, displayVramPage: ${d.displayVramPage}`);
         console.log(`  multiPage: $${(d.multiPage||0).toString(16)}`);
         console.log(`  vramOffset: [${d.vramOffset[0]}, ${d.vramOffset[1]}]`);
-        console.log(`  subMonitorType: ${['C','A','B'][this._subMonitorType] || this._subMonitorType}`);
+        console.log(`  subMonitorType: ${['C','A','B','CG','D/E'][this._subMonitorType] || this._subMonitorType}`);
         console.log(`  subBusy: ${this._subBusy}, subHalted: ${this._subHalted}`);
         console.log(`  blankFlag: ${this._blankFlag}, nmiMask: ${this._nmiMaskSub}`);
         console.log(`  subPC: $${(this.subCPU.pc||0).toString(16).toUpperCase()}`);
@@ -3200,43 +3517,44 @@ export class FM7 {
     // PSG ($FD0D/$FD0E) does not provide joystick input on FM-7.
 
     /**
-     * Set the FM-7 joystick port (0 or 1) that the first browser gamepad maps to.
-     * @param {number} port - 0 for Port 1, 1 for Port 2
+     * Assign a browser gamepad to an FM-7 joystick port independently.
+     * @param {number} fmPort - 0 for Port 1, 1 for Port 2
+     * @param {number|null} gamepadIndex - navigator.getGamepads() index, or null to unassign
      */
-    setJoystickPort(port) {
-        this._joystickPort = port & 1;
+    setJoystickAssignment(fmPort, gamepadIndex) {
+        const p = fmPort & 1;
+        this._joystickAssign[p] = (gamepadIndex == null) ? null : (gamepadIndex | 0);
     }
 
-    /** Poll Gamepad API and update joystick state. */
+    /** Read a single gamepad into an FM-7 joystick state byte (active low). */
+    _readGamepadState(gp) {
+        let state = 0xFF;
+        const deadzone = 0.3;
+        const ax0 = gp.axes[0] || 0;
+        const ax1 = gp.axes[1] || 0;
+        if (ax1 < -deadzone || (gp.buttons[12] && gp.buttons[12].pressed)) state &= ~0x01;
+        if (ax1 >  deadzone || (gp.buttons[13] && gp.buttons[13].pressed)) state &= ~0x02;
+        if (ax0 < -deadzone || (gp.buttons[14] && gp.buttons[14].pressed)) state &= ~0x04;
+        if (ax0 >  deadzone || (gp.buttons[15] && gp.buttons[15].pressed)) state &= ~0x08;
+        if ((gp.buttons[0] && gp.buttons[0].pressed) ||
+            (gp.buttons[2] && gp.buttons[2].pressed)) state &= ~0x10;
+        if ((gp.buttons[1] && gp.buttons[1].pressed) ||
+            (gp.buttons[3] && gp.buttons[3].pressed)) state &= ~0x20;
+        return state;
+    }
+
+    /** Poll Gamepad API and update joystick state based on per-port assignments. */
     _pollGamepads() {
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        // Reset both ports
         this._gamepadState[0] = 0xFF;
         this._gamepadState[1] = 0xFF;
 
-        for (let gi = 0; gi < gamepads.length; gi++) {
-            const gp = gamepads[gi];
+        for (let fmPort = 0; fmPort < 2; fmPort++) {
+            const idx = this._joystickAssign[fmPort];
+            if (idx == null) continue;
+            const gp = gamepads[idx];
             if (!gp || !gp.connected) continue;
-
-            let state = 0xFF;  // active low: 1 = not pressed
-            const deadzone = 0.3;
-            const ax0 = gp.axes[0] || 0;
-            const ax1 = gp.axes[1] || 0;
-            if (ax1 < -deadzone || (gp.buttons[12] && gp.buttons[12].pressed)) state &= ~0x01;
-            if (ax1 >  deadzone || (gp.buttons[13] && gp.buttons[13].pressed)) state &= ~0x02;
-            if (ax0 < -deadzone || (gp.buttons[14] && gp.buttons[14].pressed)) state &= ~0x04;
-            if (ax0 >  deadzone || (gp.buttons[15] && gp.buttons[15].pressed)) state &= ~0x08;
-            if ((gp.buttons[0] && gp.buttons[0].pressed) ||
-                (gp.buttons[2] && gp.buttons[2].pressed)) state &= ~0x10;
-            if ((gp.buttons[1] && gp.buttons[1].pressed) ||
-                (gp.buttons[3] && gp.buttons[3].pressed)) state &= ~0x20;
-
-            // Map browser gamepad to FM-7 port based on user selection
-            const port = (gi === 0) ? (this._joystickPort || 0) : (1 - (this._joystickPort || 0));
-            if (port < 2) {
-                this._gamepadState[port] = state;
-            }
-            if (gi >= 1) break; // Max 2 gamepads
+            this._gamepadState[fmPort] = this._readGamepadState(gp);
         }
     }
 

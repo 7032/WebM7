@@ -34,6 +34,7 @@ js/
   fdc.js            フロッピーディスクコントローラ（MB8877、D77/2Dパーサ）
   cmt.js            カセットテープコントローラ（T77パーサ、バイトオーダー自動検出、FSKスケール自動検出）
   keyboard.js       キーボード入力（FM-7 ASCIIモード / FM77AV スキャンコードモード、カスタムリマップ対応）
+  cgrom_glyph.js    CG ROMグリフレンダラ（8×8 1bpp → PNG data URL、Keyboardパネルのキートップ表示用）
   psg.js            PSG音源（AY-3-8910）+ BEEP
   opn.js            OPN FM音源（YM2203: 3ch FM合成 + SSG + タイマー）
   fdd_sound.js      FDD動作音合成（シーク・ヘッドロード・モーター・挿入/取出し音）

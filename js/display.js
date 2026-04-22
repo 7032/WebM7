@@ -736,8 +736,9 @@ export class Display {
         addr &= 0xFFFF;
         if (addr >= VRAM_SIZE) return 0xFF;
 
-        // 400-line mode: entire $0000-$BFFF maps to one bank-selected plane
+        // 400-line mode: $0000-$7FFF maps to one bank-selected plane
         if (this.displayMode === DISPLAY_MODE_400) {
+            if (addr >= PLANE_SIZE_400) return 0xFF; // $8000-$BFFF invalid
             if (this.isAV && (this.aluCommand & 0x80)) {
                 this._dispatchAluOp(addr);
             }
@@ -767,8 +768,9 @@ export class Display {
         addr &= 0xFFFF;
         if (addr >= VRAM_SIZE) return;
 
-        // 400-line mode: entire $0000-$BFFF maps to one bank-selected plane
+        // 400-line mode: $0000-$7FFF maps to one bank-selected plane
         if (this.displayMode === DISPLAY_MODE_400) {
+            if (addr >= PLANE_SIZE_400) return; // $8000-$BFFF invalid
             if (this.isAV && (this.aluCommand & 0x80)) {
                 this._dispatchAluOp(addr);
                 return;
@@ -1171,7 +1173,8 @@ export class Display {
 
         if (this.displayMode === DISPLAY_MODE_400) {
             // 400-line: 3 separate 32KB planes, scroll each
-            offset = (offset & 0x3FFF) << 1;
+            // Contiguous layout: offset is used directly without doubling.
+            offset &= (PLANE_SIZE_400 - 1);
             if (offset === 0) return;
             for (const page of [this.vram, this.vramPage1, this.vramPage2]) {
                 buf.set(page.subarray(0, offset));
@@ -1724,6 +1727,9 @@ export class Display {
         this.miscReg = 0;
         this._resolvedAnalogPalette.fill(0xFF000000);
         this._fullDirty = true;
+        this._canvas = null;
+        this._ctx = null;
+        this._lastBlank = false;
     }
 
     // ---------------------------------------------------------------

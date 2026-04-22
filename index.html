@@ -2,10 +2,11 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <link rel="icon" href="data:,">
 <title>WebM7</title>
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/softkbd.css">
 </head>
 <body>
 
@@ -58,7 +59,23 @@
                 <button id="inputPanelBtn" title="Input Monitor">Input</button>
             </div>
         </div>
+        <!-- Mobile Action Bar (hidden on desktop) -->
+        <div id="mobileBar">
+            <button id="mobileMenuBtn" title="Menu">&#9776;</button>
+            <button id="mobileKbdBtn" title="Keyboard">&#9000;</button>
+            <label class="mobile-power-switch" title="Power On / Off">
+                <input type="checkbox" id="mobilePowerToggle">
+                <span class="mps-label">OFF</span>
+                <span class="mps-track"><span class="mps-knob"></span></span>
+                <span class="mps-label">ON</span>
+            </label>
+            <button id="mobilePauseBtn" title="Pause/Resume">Pause</button>
+            <button id="mobileResetBtn" title="Reset">Reset</button>
+        </div>
     </div>
+
+    <!-- Drawer Overlay -->
+    <div class="drawer-overlay" id="drawerOverlay"></div>
 
     <!-- Right: Side Panel -->
     <div class="side-panel">
@@ -102,11 +119,12 @@
                 <input type="checkbox" id="fmCardCheck">
             </div>
             <div class="ctrl-row">
-                <label>Joystick:</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="joyPort" value="0" checked> Port 1</label>
-                    <label><input type="radio" name="joyPort" value="1"> Port 2</label>
-                </div>
+                <label>Joystick 1:</label>
+                <select id="joyDev1" style="font-size:11px;"><option value="">(None)</option></select>
+            </div>
+            <div class="ctrl-row">
+                <label>Joystick 2:</label>
+                <select id="joyDev2" style="font-size:11px;"><option value="">(None)</option></select>
             </div>
             <div class="ctrl-row">
                 <label for="cursorToNumpad">Cursor → Ten Key</label>
@@ -181,6 +199,16 @@
                     <span class="rom-name">EXTSUB.ROM</span>
                     <input type="file" id="romExtSub" accept=".rom,.ROM,.bin">
                     <span class="status-tag" id="statusExtSub">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">DICROM.ROM</span>
+                    <input type="file" id="romDicrom" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusDicrom">--</span>
+                </div>
+                <div class="rom-item">
+                    <span class="rom-name">KANJI2.ROM</span>
+                    <input type="file" id="romKanji2" accept=".rom,.ROM,.bin">
+                    <span class="status-tag" id="statusKanji2">--</span>
                 </div>
             </div>
             <div id="romInfoPanel" style="margin-top:6px;font-size:10px;color:#aaa;display:none;">
@@ -682,6 +710,12 @@ SOFTWARE.</pre>
 
 <script type="module">
 import { FM7, MACHINE_FM7, MACHINE_FM77AV, MACHINE_FM77AV40, MACHINE_FM77AV40EX } from './js/fm7.js';
+import {
+    GRPH_OVERRIDE, GRPH_SHIFT_OVERRIDE, GRPH_CURSOR,
+    KANA_OVERRIDE, KANA_SHIFT_OVERRIDE,
+    CODE_TO_FM7_ASCII, SHIFTED_OVERRIDE,
+} from './js/keyboard.js';
+import { getCGGlyphDataURL, getCGKeyCompositeDataURL } from './js/cgrom_glyph.js';
 
 // =========================================================================
 // Initialization
@@ -826,11 +860,61 @@ window.fm7Debug = {
             periodMsAt2_4576: (fm7.opn._timerBPeriod / 2457600 * 1000).toFixed(2) + 'ms',
             periodMsAt1_2288: (fm7.opn._timerBPeriod / 1228800 * 1000).toFixed(2) + 'ms',
         };
+    },
+    // Enable/disable MMR+Type-D trace logging for SCREEN @2 debugging
+    traceMMR(on = true) {
+        fm7._dbgTraceMMR = on;
+        fm7._dbgExtsubLogged = false;
+        fm7._dbgExtsubCount = 0;
+        console.log(`MMR trace ${on ? 'ON' : 'OFF'}`);
+    },
+    // Diagnose SCREEN @2 (400-line) state
+    screen2() {
+        const d = fm7.display;
+        const rv = (fm7.subRAM_DE[0x1FFE] << 8) | fm7.subRAM_DE[0x1FFF];
+        const nz = fm7.subRAM_DE.reduce((c, v) => c + (v ? 1 : 0), 0);
+        console.log('=== SCREEN @2 診断 ===');
+        console.log(`monitorType=${fm7._subMonitorType} displayMode=${d.displayMode} subramVramBank=${d.subramVramBank}`);
+        console.log(`subRAM_DE: ${nz}/8192 bytes non-zero, resetVector=$${rv.toString(16).toUpperCase().padStart(4,'0')}`);
+        console.log(`subHalted=${fm7._subHalted} subBusy=${fm7._subBusy} subResetDeferred=${fm7._subResetDeferred} blankFlag=${fm7._blankFlag}`);
+        console.log(`subCPU: DP=$${fm7.subCPU.dp.toString(16).padStart(2,'0')} CC=$${fm7.subCPU.cc.toString(16).padStart(2,'0')} S=$${fm7.subCPU.s.toString(16).padStart(4,'0')} A=$${fm7.subCPU.a.toString(16).padStart(2,'0')} B=$${fm7.subCPU.b.toString(16).padStart(2,'0')}`);
+        // Read what sub CPU sees at DP+key addresses
+        const dp = fm7.subCPU.dp << 8;
+        console.log(`[DP+$6C]=$${fm7._subRead(dp+0x6C).toString(16)} [DP+$02]=$${fm7._subRead(dp+0x02).toString(16)} D430=$${fm7._subRead(0xD430).toString(16).padStart(2,'0')}`);
+        console.log(`subPC=$${fm7.subCPU.pc.toString(16).toUpperCase().padStart(4,'0')} mainPC=$${fm7.mainCPU.pc.toString(16).toUpperCase().padStart(4,'0')}`);
+        console.log(`extromSel=${fm7._extromSel} dicromEn=${fm7._dicromEn} dicromBank=${fm7._dicromBank}`);
+        console.log(`mmrEnabled=${fm7._mmrEnabled} mmrExt=${fm7._mmrExt}`);
+        console.log(`isAV40=${fm7.isAV40} machineType=${fm7._machineType}`);
+        console.log(`canvas=${fm7._canvas?.width}x${fm7._canvas?.height}`);
+        // First 16 bytes of subRAM_DE
+        let hex = '';
+        for (let i = 0; i < 16; i++) hex += fm7.subRAM_DE[i].toString(16).padStart(2, '0') + ' ';
+        console.log(`subRAM_DE[0..15]: ${hex}`);
+        // Reset vector area
+        hex = '';
+        for (let i = 0x1FF0; i < 0x2000; i++) hex += fm7.subRAM_DE[i].toString(16).padStart(2, '0') + ' ';
+        console.log(`subRAM_DE[$1FF0..$1FFF]: ${hex}`);
+        // CG RAM check
+        const cgNz = fm7.subRAM_CG.reduce((c, v) => c + (v ? 1 : 0), 0);
+        console.log(`subRAM_CG: ${cgNz}/${fm7.subRAM_CG.length} non-zero, cgramBank=${fm7._cgramBank}`);
+        // Dump CG RAM around subPC if in D800-DFFF
+        const spc = fm7.subCPU.pc;
+        if (spc >= 0xD800 && spc < 0xE000) {
+            const base = fm7._cgramBank * 0x0800;
+            hex = '';
+            for (let i = 0; i < 16; i++) hex += fm7.subRAM_CG[base + (spc - 0xD800) + i].toString(16).padStart(2, '0') + ' ';
+            console.log(`CG RAM at $${spc.toString(16)}: ${hex}`);
+            // Also read via _subRead to confirm
+            hex = '';
+            for (let i = 0; i < 16; i++) hex += fm7._subRead(spc + i).toString(16).padStart(2, '0') + ' ';
+            console.log(`_subRead($${spc.toString(16)}): ${hex}`);
+        }
     }
 };
 console.log('fm7Debug available. Try: fm7Debug.saveSnapshot()');
 console.log('  BGM tempo probe: await fm7Debug.pcRate([0x27F6, 0x2222], 5000)');
 console.log('  Timer B inspect: fm7Debug.timerB()');
+console.log('  SCREEN @2 debug: fm7Debug.traceMMR() / fm7Debug.screen2()');
 const canvas = document.getElementById('screen');
 const screenContainer = document.getElementById('screenContainer');
 
@@ -895,11 +979,15 @@ const romSubSysAInput  = document.getElementById('romSubSysA');
 const romSubSysBInput  = document.getElementById('romSubSysB');
 const romKanjiInput    = document.getElementById('romKanji');
 const romExtSubInput   = document.getElementById('romExtSub');
+const romDicromInput   = document.getElementById('romDicrom');
+const romKanji2Input   = document.getElementById('romKanji2');
 const statusInitiateEl = document.getElementById('statusInitiate');
 const statusSubSysAEl  = document.getElementById('statusSubSysA');
 const statusSubSysBEl  = document.getElementById('statusSubSysB');
 const statusKanjiEl    = document.getElementById('statusKanji');
 const statusExtSubEl   = document.getElementById('statusExtSub');
+const statusDicromEl   = document.getElementById('statusDicrom');
+const statusKanji2El   = document.getElementById('statusKanji2');
 const siteTitle        = document.getElementById('siteTitle');
 
 // =========================================================================
@@ -940,7 +1028,7 @@ machineTypeSelect.addEventListener('change', () => {
     saveSetting('machineType', machineTypeSelect.value);
 });
 
-// Lock control groups during VM run (machineType, bootMode, fmCard locked; joyPort stays live)
+// Lock control groups during VM run (machineType, bootMode, fmCard locked; joystick stays live)
 const _lockedRadioState = {};
 function setControlsLocked(locked) {
     // machineType is a <select>
@@ -982,22 +1070,69 @@ document.querySelectorAll('input[name="bootMode"]').forEach(radio => {
     });
 });
 
-// Joystick port: live-switchable during run
-document.querySelectorAll('input[name="joyPort"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        if (fm7._running) {
-            fm7.setJoystickPort(parseInt(radio.value));
+// Joystick: per-port gamepad assignment (live-switchable during run)
+const joyDevSelects = [document.getElementById('joyDev1'), document.getElementById('joyDev2')];
+// Persisted gamepad.id strings (null when unassigned)
+const joyDevSavedIds = [null, null];
+
+function _gamepadShortLabel(gp) {
+    // gp.id is typically long (e.g. "Xbox ... (Vendor: ... Product: ...)"); trim for dropdown width
+    const raw = gp.id || `Gamepad ${gp.index}`;
+    return raw.length > 40 ? raw.slice(0, 40) + '…' : raw;
+}
+
+function refreshJoystickLists() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const connected = [];
+    for (let i = 0; i < pads.length; i++) {
+        if (pads[i] && pads[i].connected) connected.push(pads[i]);
+    }
+    joyDevSelects.forEach((sel, fmPort) => {
+        if (!sel) return;
+        const prevId = joyDevSavedIds[fmPort];
+        sel.innerHTML = '';
+        const noneOpt = document.createElement('option');
+        noneOpt.value = '';
+        noneOpt.textContent = '(None)';
+        sel.appendChild(noneOpt);
+        let matchedIdx = null;
+        for (const gp of connected) {
+            const opt = document.createElement('option');
+            opt.value = gp.id;
+            opt.dataset.index = String(gp.index);
+            opt.textContent = _gamepadShortLabel(gp);
+            sel.appendChild(opt);
+            if (prevId && gp.id === prevId && matchedIdx === null) matchedIdx = gp.index;
+        }
+        if (matchedIdx !== null) {
+            sel.value = prevId;
+            fm7.setJoystickAssignment(fmPort, matchedIdx);
+        } else {
+            sel.value = '';
+            fm7.setJoystickAssignment(fmPort, null);
         }
     });
-});
-document.querySelectorAll('input[name="joyPort"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        if (fm7._running) return; // Locked during run
-        const port = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
-        fm7.setJoystickPort(port);
-        saveSetting('joyPort', port);
+}
+
+joyDevSelects.forEach((sel, fmPort) => {
+    if (!sel) return;
+    sel.addEventListener('change', () => {
+        const id = sel.value;
+        if (id === '') {
+            joyDevSavedIds[fmPort] = null;
+            fm7.setJoystickAssignment(fmPort, null);
+        } else {
+            const opt = sel.selectedOptions[0];
+            const idx = opt && opt.dataset.index != null ? parseInt(opt.dataset.index) : null;
+            joyDevSavedIds[fmPort] = id;
+            fm7.setJoystickAssignment(fmPort, idx);
+        }
+        saveSetting(`joyDev${fmPort + 1}Id`, joyDevSavedIds[fmPort]);
     });
 });
+
+window.addEventListener('gamepadconnected', refreshJoystickLists);
+window.addEventListener('gamepaddisconnected', refreshJoystickLists);
 
 // =========================================================================
 // Cursor → Numpad preset
@@ -1031,16 +1166,17 @@ cursorToNumpadCheck.addEventListener('change', () => {
 // =========================================================================
 
 document.getElementById('screenshotBtn').addEventListener('click', () => {
-    // Canvas is 640x200 (native pixels); double vertically to 640x400
-    // to match the actual display aspect ratio (CRT scanlines were tall)
+    // 200-line modes: canvas is 640x200, double vertically to 640x400
+    // 400-line mode:  canvas is already 640x400, use as-is
     const w = canvas.width;
     const h = canvas.height;
+    const is400 = (h >= 400);
     const tmp = document.createElement('canvas');
     tmp.width = w;
-    tmp.height = h * 2;
+    tmp.height = is400 ? h : h * 2;
     const ctx = tmp.getContext('2d');
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(canvas, 0, 0, w, h * 2);
+    ctx.drawImage(canvas, 0, 0, tmp.width, tmp.height);
     tmp.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
@@ -1297,7 +1433,7 @@ async function saveDisk(slot, name, data) {
 }
 async function loadDiskSaved(slot) { return dbGet(STORE_DISKS, slot); }
 
-// Save/load a setting (machineType, joyPort, cursorToNumpad, sectionState).
+// Save/load a setting (machineType, joyDev1Id, joyDev2Id, cursorToNumpad, sectionState).
 async function saveSetting(key, value) { return dbPut(STORE_SETTINGS, key, value); }
 async function loadSetting(key) { return dbGet(STORE_SETTINGS, key); }
 
@@ -1316,6 +1452,8 @@ const ROM_FILE_MAP = {
     'subsys_a.rom': { loader: (d) => fm7.loadSubROM_A(d),  status: () => statusSubSysAEl, slot: 'subsys_a' },
     'subsys_b.rom': { loader: (d) => fm7.loadSubROM_B(d),  status: () => statusSubSysBEl, slot: 'subsys_b' },
     'kanji.rom':   { loader: (d) => fm7.loadKanjiROM(d),   status: () => statusKanjiEl,   slot: 'kanji' },
+    'kanji2.rom':  { loader: (d) => fm7.loadKanji2ROM(d), status: () => statusKanji2El,  slot: 'kanji2' },
+    'dicrom.rom':  { loader: (d) => fm7.loadDicromROM(d), status: () => statusDicromEl,  slot: 'dicrom' },
     'extsub.rom':  { loader: (d) => fm7.loadExtSubROM(d), status: () => statusExtSubEl,  slot: 'extsub' },
 };
 
@@ -1377,6 +1515,8 @@ setupIndividualROM(romKanjiInput,    (d) => fm7.loadKanjiROM(d),   statusKanjiEl
 
 // FM77AV40EX ROMs
 setupIndividualROM(romExtSubInput,   (d) => fm7.loadExtSubROM(d),  statusExtSubEl,  'extsub');
+setupIndividualROM(romDicromInput,   (d) => fm7.loadDicromROM(d),  statusDicromEl,  'dicrom');
+setupIndividualROM(romKanji2Input,   (d) => fm7.loadKanji2ROM(d),  statusKanji2El,  'kanji2');
 
 // Restore persisted settings from IndexedDB on startup.
 // One-time migration: pull from legacy localStorage if IndexedDB is empty.
@@ -1400,22 +1540,12 @@ setupIndividualROM(romExtSubInput,   (d) => fm7.loadExtSubROM(d),  statusExtSubE
         if (r) r.checked = true;
     }
 
-    // Joystick port
-    let jp = await loadSetting('joyPort');
-    if (jp === undefined) {
-        // Migrate from legacy localStorage
-        const legacy = localStorage.getItem('fm7_joyport');
-        if (legacy !== null) {
-            jp = parseInt(legacy);
-            await saveSetting('joyPort', jp);
-            localStorage.removeItem('fm7_joyport');
-        }
+    // Joystick per-port gamepad assignment (by gamepad.id)
+    for (let p = 0; p < 2; p++) {
+        const id = await loadSetting(`joyDev${p + 1}Id`);
+        joyDevSavedIds[p] = (typeof id === 'string' && id.length) ? id : null;
     }
-    if (jp === 0 || jp === 1) {
-        fm7.setJoystickPort(jp);
-        const r = document.querySelector(`input[name="joyPort"][value="${jp}"]`);
-        if (r) r.checked = true;
-    }
+    refreshJoystickLists();
 
     // Cursor → Ten Key
     let ck = await loadSetting('cursorToNumpad');
@@ -1532,6 +1662,8 @@ async function updateRomInfo() {
         ...(machineTypeSelect.value === 'fm77av40ex' ? [
             { name: 'EXTSUB.ROM', data: fm7.extsubROM, loaded: fm7.romLoaded.extsub,
               size: fm7._extsubROMSize },
+            { name: 'DICROM.ROM', data: fm7.dicromROM, loaded: fm7.romLoaded.dicrom },
+            { name: 'KANJI2.ROM', data: fm7.kanjiROM2, loaded: fm7.romLoaded.kanji2 },
         ] : []),
     ];
 
@@ -1763,14 +1895,19 @@ powerToggle.addEventListener('change', () => {
         }
         // Start: reset + run
         fm7.setFMCard(document.getElementById('fmCardCheck').checked);
-        const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
-        fm7.setJoystickPort(joyPort);
         fm7.reset();
         fm7.start(canvas);
         setEmuState('running');
     } else {
-        // Stop: back to initial state
+        // Power off: stop execution and zero-reset all hardware state
+        // (display mode, palette, PSG/OPN, MMR/TWR, etc.) so that a subsequent
+        // power-on starts from a clean slate — matches real hardware behavior.
         fm7.stop();
+        fm7.reset();
+        if (canvas.getContext) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
         setEmuState('stopped');
     }
 });
@@ -1816,8 +1953,6 @@ resetBtn.addEventListener('click', () => {
     fm7.stop();
     updateMachineType();
     fm7.setFMCard(document.getElementById('fmCardCheck').checked);
-    const joyPort = parseInt(document.querySelector('input[name="joyPort"]:checked').value);
-    fm7.setJoystickPort(joyPort);
     fm7.reset();
     fm7.start(canvas);
     setEmuState('running');
@@ -1919,8 +2054,10 @@ FM7_KBD_LAYOUT.forEach((row, ri) => {
         if (code === 'Enter') cls += ' enter-wide';
         k.className = cls;
         k.textContent = label;
+        if (label) k.dataset.label = label;
         if (code && code !== '_BREAK_') {
             k.title = code;
+            k.dataset.code = code;
             kbdKeyMap.set(code, k);
         } else if (code === '_BREAK_') {
             k.title = 'BREAK';
@@ -1931,12 +2068,14 @@ FM7_KBD_LAYOUT.forEach((row, ri) => {
 });
 
 // Real-time key highlight
+let _shiftDown = false;
 document.addEventListener('keydown', (e) => {
     const el = kbdKeyMap.get(e.code);
     if (el) el.classList.add('active');
     if (fm7._breakKeyCodes.includes(e.code)) {
         fm7KbdEl.querySelector('.break-key')?.classList.add('active');
     }
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') _shiftDown = true;
     keyDisplay.textContent = e.code;
 });
 document.addEventListener('keyup', (e) => {
@@ -1945,7 +2084,119 @@ document.addEventListener('keyup', (e) => {
     if (fm7._breakKeyCodes.includes(e.code)) {
         fm7KbdEl.querySelector('.break-key')?.classList.remove('active');
     }
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') _shiftDown = false;
 });
+
+// =========================================================================
+// Keyboard panel: key-top glyph rendering via CG ROM (#145)
+// =========================================================================
+//
+// "Typewriter" keys (alpha/digit/symbol/kana range — keys whose produced
+// character depends on Shift/CAPS/KANA/GRPH) always render a CG ROM glyph
+// matching the current modifier state. Non-typewriter keys (modifiers,
+// function keys, cursor, numpad, ESC/TAB/INS/DEL, EL/CLS/DUP/HOME, BREAK)
+// keep their static text labels and only flash on press.
+// Falls back to the static text label when the CG ROM is not yet loaded
+// or the glyph is blank.
+const TYPEWRITER_CODES = new Set([
+    'Digit1','Digit2','Digit3','Digit4','Digit5','Digit6','Digit7','Digit8','Digit9','Digit0',
+    'Minus','Equal','Backslash',
+    'KeyQ','KeyW','KeyE','KeyR','KeyT','KeyY','KeyU','KeyI','KeyO','KeyP',
+    'BracketLeft',
+    'KeyA','KeyS','KeyD','KeyF','KeyG','KeyH','KeyJ','KeyK','KeyL',
+    'Semicolon','Quote','IntlBackslash',
+    'KeyZ','KeyX','KeyC','KeyV','KeyB','KeyN','KeyM',
+    'Comma','Period','Slash','IntlRo',
+]);
+// Label-driven shift table (FM-7 JIS typewriter row). Letters are handled
+// separately via caps XOR shift.
+const LABEL_SHIFT = new Map([
+    ['1','!'], ['2','"'], ['3','#'], ['4','$'], ['5','%'],
+    ['6','&'], ['7','\''], ['8','('], ['9',')'],
+    ['-','='], ['^','~'], ['¥','|'],
+    ['@','`'], ['[','{'], [']','}'],
+    [';','+'], [':','*'],
+    [',','<'], ['.','>'], ['/','?'],
+]);
+// Unicode label → FM-7 CG ROM code remap (JIS X 0201 replaces 0x5C backslash
+// with the yen sign). Unicode `¥` is U+00A5 but FM-7 stores it at 0x5C.
+const LABEL_FM7_CODE = new Map([
+    ['¥', 0x5C],
+]);
+// Compute the four corner glyphs for a typewriter key:
+//   left   = normal / unshifted (FM-7 default for this key)
+//   top    = Shift-held variant
+//   right  = GRPH-held variant
+//   bottom = KANA toggle variant
+function _labelCodeUnshifted(label) {
+    if (!label || label.length !== 1) return null;
+    if (/^[A-Z]$/.test(label)) return label.toLowerCase().charCodeAt(0);
+    return LABEL_FM7_CODE.get(label) ?? label.charCodeAt(0);
+}
+function _labelCodeShifted(label) {
+    if (!label || label.length !== 1) return null;
+    if (/^[A-Z]$/.test(label)) return label.charCodeAt(0);
+    const s = LABEL_SHIFT.get(label);
+    if (!s) return null;
+    return LABEL_FM7_CODE.get(s) ?? s.charCodeAt(0);
+}
+function _glyphCodesFor(code, label) {
+    return {
+        left:   _labelCodeUnshifted(label),
+        top:    _labelCodeShifted(label),
+        right:  GRPH_OVERRIDE.get(code) ?? null,
+        bottom: KANA_OVERRIDE.get(code) ?? null,
+    };
+}
+// Which composite position is the "currently produced" character?
+function _activePosition(shift, caps, graph, kana, label) {
+    if (graph) return 'right';
+    if (kana)  return 'bottom';
+    if (label && /^[A-Z]$/.test(label)) {
+        return (shift !== caps) ? 'top' : 'left';   // caps inverts shift for letters
+    }
+    return shift ? 'top' : 'left';
+}
+function _applyKbdLabels(shift, caps, graph, kana) {
+    const rom = fm7.cgROM;
+    for (const [code, el] of kbdKeyMap) {
+        if (!TYPEWRITER_CODES.has(code)) continue;
+        const glyphs = _glyphCodesFor(code, el.dataset.label);
+        const active = _activePosition(shift, caps, graph, kana, el.dataset.label);
+        const url = getCGKeyCompositeDataURL(rom, glyphs, active);
+        const img = el.querySelector('img.fm7-key-glyph');
+        if (url) {
+            if (img) {
+                if (img.src !== url) img.src = url;
+            } else {
+                el.textContent = '';
+                const g = document.createElement('img');
+                g.className = 'fm7-key-glyph';
+                g.src = url;
+                g.alt = '';
+                el.appendChild(g);
+            }
+        } else {
+            if (img) img.remove();
+            if (el.textContent !== (el.dataset.label || '')) {
+                el.textContent = el.dataset.label || '';
+            }
+        }
+    }
+}
+let _prevState = '';
+function _refreshKbdLabels(force = false) {
+    const shift = _shiftDown;
+    const caps  = !!fm7.keyboard?.capsLock;
+    const graph = !!fm7.keyboard?.graphMode;
+    const kana  = !!fm7.keyboard?.kanaMode;
+    const romReady = !!fm7.romLoaded?.cg;
+    const key = `${shift ? 1 : 0}|${caps ? 1 : 0}|${graph ? 1 : 0}|${kana ? 1 : 0}|${romReady ? 1 : 0}`;
+    if (!force && key === _prevState) return;
+    _prevState = key;
+    _applyKbdLabels(shift, caps, graph, kana);
+}
+
 // Update LED indicators (CAP/カナ) from emulator state
 setInterval(() => {
     const caps = fm7.keyboard?.capsLock;
@@ -1958,7 +2209,8 @@ setInterval(() => {
     if (modeEl) modeEl.textContent = kbdMode;
     const tbMode = document.getElementById('tbKbdMode');
     if (tbMode) tbMode.textContent = kbdMode;
-}, 200);
+    _refreshKbdLabels();
+}, 100);
 
 // BREAK key configuration
 const breakKeyVal = document.getElementById('breakKeyVal');
@@ -2798,6 +3050,97 @@ const year = new Date().getFullYear();
 document.getElementById('copyrightYear').textContent =
     year > 2026 ? '2026-' + year : '2026';
 
+// =========================================================================
+// Mobile: drawer + action bar + footer relocation
+// =========================================================================
+{
+    const sidePanel = document.querySelector('.side-panel');
+    const overlay = document.getElementById('drawerOverlay');
+    const menuBtn = document.getElementById('mobileMenuBtn');
+    const kbdBtn = document.getElementById('mobileKbdBtn');
+    const mPowerToggle = document.getElementById('mobilePowerToggle');
+    const mainPowerToggle = document.getElementById('powerToggle');
+    const mPauseBtn = document.getElementById('mobilePauseBtn');
+    const mainPauseBtn = document.getElementById('pauseBtn');
+    const mResetBtn = document.getElementById('mobileResetBtn');
+
+    function openDrawer() {
+        sidePanel.classList.add('drawer-open');
+        overlay.classList.add('open');
+    }
+    function closeDrawer() {
+        sidePanel.classList.remove('drawer-open');
+        overlay.classList.remove('open');
+    }
+
+    if (menuBtn) {
+        menuBtn.addEventListener('click', () => {
+            sidePanel.classList.contains('drawer-open') ? closeDrawer() : openDrawer();
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', closeDrawer);
+    }
+    // Power: sync mobile toggle with main power toggle
+    if (mPowerToggle && mainPowerToggle) {
+        mPowerToggle.addEventListener('change', () => {
+            if (mPowerToggle.checked !== mainPowerToggle.checked) {
+                mainPowerToggle.click();
+            }
+        });
+        mainPowerToggle.addEventListener('change', () => {
+            mPowerToggle.checked = mainPowerToggle.checked;
+        });
+    }
+    // Pause/Resume: sync label with main pause button
+    if (mPauseBtn && mainPauseBtn) {
+        mPauseBtn.addEventListener('click', () => {
+            mainPauseBtn.click();
+        });
+        const syncPauseLabel = () => {
+            mPauseBtn.textContent = mainPauseBtn.textContent === 'Resume' ? 'Resume' : 'Pause';
+        };
+        new MutationObserver(syncPauseLabel).observe(mainPauseBtn, { childList: true, characterData: true, subtree: true });
+    }
+    if (mResetBtn) {
+        mResetBtn.addEventListener('click', () => {
+            document.getElementById('resetBtn').click();
+        });
+    }
+    if (kbdBtn) {
+        kbdBtn.addEventListener('click', () => {
+            const sk = document.getElementById('softKbd');
+            if (sk) {
+                const show = sk.hidden;
+                sk.hidden = !show;
+                kbdBtn.classList.toggle('active', show);
+                localStorage.setItem('webm7.ui.vkbd', show ? '1' : '0');
+            }
+        });
+    }
+
+    // Canvas: prevent scroll on touch
+    const canvas = document.getElementById('screen');
+    if (canvas) {
+        canvas.style.touchAction = 'none';
+    }
+
+    // Mobile: move footer into drawer (side-panel bottom)
+    const isTouchDev = window.matchMedia('(any-pointer: coarse)').matches
+        || 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (isTouchDev && sidePanel) {
+        const footer = document.querySelector('.footer');
+        if (footer) {
+            sidePanel.appendChild(footer);
+        }
+    }
+}
+
 </script>
+
+<!-- Virtual Keyboard (hidden by default, shown on mobile) -->
+<div id="softKbd" hidden></div>
+<script type="module" src="js/softkbd.js"></script>
+
 </body>
 </html>
