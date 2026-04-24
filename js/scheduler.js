@@ -12,17 +12,28 @@
  *   VSync      - fires every 16667 us (60 Hz NTSC)
  */
 
-// FM-7: 1.794 MHz, FM77AV: 2 MHz
-let CPU_CLOCK_HZ = 1794000;  // FM-7: 1.794MHz
+// Main and sub CPU clocks can differ. On FM-7 / FM77AV hardware:
+//   Main CPU effective  = 1.794 MHz (nominal 2 MHz minus memory wait states)
+//   Sub  CPU            = 2.000 MHz
+// Scheduler advances sub by `mainCycles × (SUB_CLOCK / MAIN_CLOCK)` each step.
+let CPU_CLOCK_HZ = 1794000;         // Main CPU effective clock
+let SUB_CLOCK_HZ = 2000000;         // Sub CPU clock (independent)
 let CYCLES_PER_MICROSECOND = CPU_CLOCK_HZ / 1000000;
+let SUB_CYCLE_RATIO = SUB_CLOCK_HZ / CPU_CLOCK_HZ;
 
 /**
- * Set CPU clock speed. Called when machine type changes.
- * @param {number} hz - Clock frequency in Hz (1794000 for FM-7, 2000000 for FM77AV)
+ * Set main CPU clock speed. Called when machine type changes.
+ * Sub CPU stays at its own fixed rate (see setSubCPUClock).
  */
 function setCPUClock(hz) {
     CPU_CLOCK_HZ = hz;
     CYCLES_PER_MICROSECOND = hz / 1000000;
+    SUB_CYCLE_RATIO = SUB_CLOCK_HZ / CPU_CLOCK_HZ;
+}
+
+function setSubCPUClock(hz) {
+    SUB_CLOCK_HZ = hz;
+    SUB_CYCLE_RATIO = SUB_CLOCK_HZ / CPU_CLOCK_HZ;
 }
 
 /**
@@ -245,9 +256,12 @@ export class Scheduler {
             const mainElapsed = this.mainCPU.exec();
             this.mainCyclesTotal += mainElapsed;
 
-            // --- Sub CPU: catch up to main CPU ---
+            // --- Sub CPU: catch up to main CPU, scaled by SUB/MAIN clock ratio ---
+            // Real HW: sub runs at 2.0 MHz while main effective is 1.794 MHz,
+            // so sub does ~11.5% more cycles per wall-time unit than main.
             if (!this.subHalted && this.subCPU) {
-                while (this.subCyclesTotal < this.mainCyclesTotal) {
+                const subTarget = this.mainCyclesTotal * SUB_CYCLE_RATIO;
+                while (this.subCyclesTotal < subTarget) {
                     const subElapsed = this.subCPU.exec();
                     this.subCyclesTotal += subElapsed;
                 }
@@ -277,7 +291,8 @@ export class Scheduler {
         this.mainCyclesTotal += mainElapsed;
 
         if (!this.subHalted && this.subCPU) {
-            while (this.subCyclesTotal < this.mainCyclesTotal) {
+            const subTarget = this.mainCyclesTotal * SUB_CYCLE_RATIO;
+            while (this.subCyclesTotal < subTarget) {
                 const subElapsed = this.subCPU.exec();
                 this.subCyclesTotal += subElapsed;
             }
@@ -311,4 +326,4 @@ export class Scheduler {
 }
 
 // Export constants for external use
-export { CPU_CLOCK_HZ, CYCLES_PER_MICROSECOND, usToCycles, cyclesToUs, setCPUClock };
+export { CPU_CLOCK_HZ, CYCLES_PER_MICROSECOND, usToCycles, cyclesToUs, setCPUClock, setSubCPUClock };

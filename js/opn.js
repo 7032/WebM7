@@ -1065,9 +1065,10 @@ export class OPN {
         this._timerAIRQ = false;
         this._timerBIRQ = false;
 
-        // Timer clock ratio: OPN_clock / CPU_clock.
-        // FM-7: 1.0 (OPN and CPU share same clock domain in emulation).
-        // FM77AV: 1.2288 (OPN at 2.4576 MHz, CPU at 2 MHz).
+        // Timer clock ratio: OPN_TIMER_CLOCK / CPU_clock.
+        // Recomputed in _recomputeTimerRatio() when CPU clock or AV mode changes.
+        this._isAV = false;
+        this._cpuHz = 0;
         this._timerClockRatio = 1.0;
 
         // Audio output
@@ -1112,12 +1113,25 @@ export class OPN {
      * the CPU clock (2 MHz), requiring timer count scaling.
      */
     setAVMode(isAV) {
-        this._timerClockRatio = isAV ? OPN_CPU_RATIO_AV : 1.0;
+        this._isAV = isAV;
+        this._recomputeTimerRatio();
     }
 
     setCPUClock(hz) {
+        this._cpuHz = hz;
         this._cyclesPerSample = hz / SAMPLE_RATE;
         this._ssg.setCPUClock(hz);
+        this._recomputeTimerRatio();
+    }
+
+    _recomputeTimerRatio() {
+        // OPN timer clock on FM-7/77 hardware is 1.2288 MHz, independent of
+        // the CPU clock. Convert CPU cycles → OPN-timer cycles by rate ratio.
+        if (this._isAV && this._cpuHz > 0) {
+            this._timerClockRatio = OPN_TIMER_CLOCK_AV / this._cpuHz;
+        } else {
+            this._timerClockRatio = 1.0;
+        }
     }
 
     _configureRate(c, r, ip) {

@@ -205,9 +205,9 @@ export class FM7 {
         this._nmiMaskSub      = false;   // NMI mask for sub CPU (bit 7 of $D430)
         this._subResetFlag    = false;   // Sub CPU reset flag (read via $D430 bit 0)
         this._subResetDeferred = false;  // $FD13 reset deferred while sub CPU is halted
-        this._vsyncFlag       = true;    // TRUE=active display, FALSE=vertical blanking
+        this._vsyncFlag       = false;   // TRUE only during the short VSYNC pulse (510μs)
+        this._vsyncPhase      = 0;       // 0 = before pulse (most of frame), 1 = during pulse
         this._blankFlag       = false;   // TRUE=horizontal blanking active
-        this._vblankCycles    = 0;       // Cycle counter for VBlank period
         this._subNmiDelay     = 0;       // Cycles to delay NMI after sub CPU reset (INTR_SLOAD emulation)
         // FM77AV key encoder MCU at sub $D431/$D432 (see _keyEncProcessByte)
         this._rtcRxBuf = [];      // Sub-side response buffer (read via $D431)
@@ -1810,15 +1810,7 @@ export class FM7 {
                 // FDC state machine step
                 this.fdc.step(mainElapsed);
 
-                // VBlank timing: count down VBlank period
-                if (this._vblankCycles > 0) {
-                    this._vblankCycles -= mainElapsed;
-                    if (this._vblankCycles <= 0) {
-                        this._vsyncFlag = true;  // Active display resumes
-                        this._vblankCycles = 0;
-                    }
-                }
-
+                // VSYNC pulse timing is driven by scheduler event (2-phase).
                 // HBlank timing (§12.1): line period ≈63.5μs (127 cycles @2MHz)
                 // HBlank = 24μs (48 cycles), display = 39-40μs (79 cycles)
                 if (this.isFM77AV) {
@@ -1841,22 +1833,35 @@ export class FM7 {
                 // (real hardware applies halt at instruction boundary)
                 this._subHaltAck();
 
-                // Sub CPU: catch up to main CPU
-                if (!this.scheduler.subHalted && this.subCPU) {
-                    let subGuard = 1000;
-                    while (this.scheduler.subCyclesTotal < this.scheduler.mainCyclesTotal) {
-                        const subElapsed = this.subCPU.exec();
-                        if (subElapsed <= 0) {
-                            console.error('[EXEC] subCPU.exec() returned 0 at PC=$' +
-                                this.subCPU.pc.toString(16));
-                            this.scheduler.subCyclesTotal += 2;
-                            break;
+                // Sub CPU: catch up to main CPU.
+                // While halted, subCyclesTotal is fast-forwarded (without
+                // executing sub instructions) so it doesn't fall behind main.
+                // This matches real HW: sub clock is frozen during HALT, so
+                // the time that passes while halted does NOT translate into
+                // extra sub work once halt is released.
+                if (this.subCPU) {
+                    if (this.scheduler.subHalted) {
+                        this.scheduler.subCyclesTotal = this.scheduler.mainCyclesTotal;
+                    } else {
+                        let subGuard = 1000;
+                        while (this.scheduler.subCyclesTotal < this.scheduler.mainCyclesTotal) {
+                            const subElapsed = this.subCPU.exec();
+                            if (subElapsed <= 0) {
+                                console.error('[EXEC] subCPU.exec() returned 0 at PC=$' +
+                                    this.subCPU.pc.toString(16));
+                                this.scheduler.subCyclesTotal += 2;
+                                break;
+                            }
+                            this.scheduler.subCyclesTotal += subElapsed;
+                            // Also check after each sub CPU instruction for responsive halt
+                            this._subHaltAck();
+                            if (this.scheduler.subHalted) {
+                                // Once sub halts mid-catchup, skip remaining main cycles.
+                                this.scheduler.subCyclesTotal = this.scheduler.mainCyclesTotal;
+                                break;
+                            }
+                            if (--subGuard <= 0) break;
                         }
-                        this.scheduler.subCyclesTotal += subElapsed;
-                        // Also check after each sub CPU instruction for responsive halt
-                        this._subHaltAck();
-                        if (this.scheduler.subHalted) break;
-                        if (--subGuard <= 0) break;
                     }
                 }
 
@@ -1875,15 +1880,30 @@ export class FM7 {
             this._timerIRQ = true;
         });
 
-        // VSync event (66.1 Hz, ~15120μs frame period per FM7 Programmers Guide §12.1)
-        this.scheduler.addEvent('vsync', 15120, () => {
-            this.display.frameCount++;
-
-            // Start vertical blanking period
-            this._vsyncFlag = false;  // Enter VBlank
-            // VBlank: 238 total lines - 200 visible = 38 lines × 63.5μs ≈ 2413μs
-            // (Previously 510μs was only the VSYNC pulse width, not the full blanking interval)
-            this._vblankCycles = usToCycles(2413);
+        // VSync event — 2-phase, mode-dependent pulse width.
+        //   200-line (15kHz): vfp+vbp+vdisp 16130μs + vsync pulse 510μs = 16640μs (60.1Hz)
+        //   400-line (24kHz): vfp+vbp+vdisp 17720μs + vsync pulse  330μs = 18050μs (55.4Hz)
+        // `_vsyncFlag` is TRUE **only during the pulse** (matches $FD12 bit 0 /
+        // $D430 bit 2 semantics: 0 when NOT in vsync). Games that poll for
+        // "bit 0 goes high" rely on this short pulse as a once-per-frame
+        // synchronization edge.
+        this.scheduler.addEvent('vsync', 16130, () => {
+            const is400 = (this.display.displayMode === 3);
+            const evt = this.scheduler.getEvent('vsync');
+            if (this._vsyncPhase === 0) {
+                // Pre-pulse period elapsed → begin VSYNC pulse
+                this._vsyncFlag = true;
+                this._vsyncPhase = 1;
+                this.display.frameCount++;
+                const newReload = usToCycles(is400 ? 330 : 510);
+                if (evt) { evt.reload = newReload; evt.current = newReload; }
+            } else {
+                // Pulse ended → back to pre-pulse for the rest of the frame
+                this._vsyncFlag = false;
+                this._vsyncPhase = 0;
+                const newReload = usToCycles(is400 ? 17720 : 16130);
+                if (evt) { evt.reload = newReload; evt.current = newReload; }
+            }
         });
 
         // Sub CPU NMI timer (50 Hz = 20ms, independent of VSync per §4.2)
@@ -2462,7 +2482,9 @@ export class FM7 {
         this._machineType = type;
         const isAV = type !== MACHINE_FM7;
         const isAV40 = type === MACHINE_FM77AV40 || type === MACHINE_FM77AV40EX;
-        const cpuHz = isAV ? 2000000 : 1794000;
+        // FM-7 / FM77AV main CPU effective clock is 1.794 MHz (memory wait cycles
+        // slow the nominal 2 MHz down). Matching the widely-used reference.
+        const cpuHz = 1794000;
         setCPUClock(cpuHz);
         FDC.setCPUClock(cpuHz);
         this.opn.setAVMode(isAV);
@@ -2842,9 +2864,9 @@ export class FM7 {
             this._nmiMaskSub = false;
             this._subResetFlag = false;
             this._subResetDeferred = false;
-            this._vsyncFlag = true;
+            this._vsyncFlag = false;
+            this._vsyncPhase = 0;
             this._blankFlag = true;   // Blanking active at power-on
-            this._vblankCycles = 0;
             this._analogPaletteAddr = 0;
             this._analogPalette.fill(0);
             // MMR reset
@@ -2901,9 +2923,9 @@ export class FM7 {
             this._nmiMaskSub = false;
             this._subResetFlag = false;
             this._subResetDeferred = false;
-            this._vsyncFlag = true;
+            this._vsyncFlag = false;
+            this._vsyncPhase = 0;
             this._blankFlag = true;
-            this._vblankCycles = 0;
             this._analogPaletteAddr = 0;
             this._analogPalette.fill(0);
             this._mmrEnabled = false;
