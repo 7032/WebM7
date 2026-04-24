@@ -75,6 +75,16 @@ export class Display {
         this._vramBuf2 = new ArrayBuffer(VRAM_SIZE);
         this.vramPage2 = new Uint8Array(this._vramBuf2);
 
+        // VRAM pages 3-5: back-buffer planes for AV40EX/SX 2-page 400-line and
+        // 2-page 262K/4096-color modes. Mirror vram/vramPage1/vramPage2 layout
+        // but are used only when activeVramPage/displayVramPage === 1.
+        this._vramBuf3 = new ArrayBuffer(VRAM_SIZE);
+        this.vramPage3 = new Uint8Array(this._vramBuf3);
+        this._vramBuf4 = new ArrayBuffer(VRAM_SIZE);
+        this.vramPage4 = new Uint8Array(this._vramBuf4);
+        this._vramBuf5 = new ArrayBuffer(VRAM_SIZE);
+        this.vramPage5 = new Uint8Array(this._vramBuf5);
+
         // Temporary buffer for VRAM scroll rotation (32KB for 400-line planes)
         this._scrollBuf = new Uint8Array(PLANE_SIZE_400);
 
@@ -108,6 +118,23 @@ export class Display {
         this.displayVramPage = 0;   // Renderer reads from this page (0 or 1)
         this.displayMode = DISPLAY_MODE_640;  // 640x200 or 320x200
         this._mode320Flag = false;  // Tracks $FD12 bit6 independently from displayMode
+
+        // FM77AV40EX/SX VRAM block select ($D433 bits 0/4)
+        // Front/back block for 2-page 400-line / 262K-color / 4096-color modes.
+        // Orthogonal to activeVramPage/displayVramPage ($D430 bits 5/6, used for
+        // 200-line 2-page). In 400/262K modes the renderer and VRAM writes
+        // consult these instead.
+        this.blockActive = 0;
+        this.blockDisplay = 0;
+
+        // FM77AV40EX hardware window ($D438-$D43F). Pixel rectangle [x1,x2) × [y1,y2)
+        // — inside the window the renderer reads from the *other* block
+        // (back if blockDisplay=0, front if blockDisplay=1). X aligned on 8 px.
+        this.windowX1 = 0;
+        this.windowX2 = 0;
+        this.windowY1 = 0;
+        this.windowY2 = 0;
+        this.windowOpen = false;
 
         // Diagnostic ring buffer for scroll register / display state events.
         // Tags: D40E, D40F, SCROLL, APG, DPG, MODE, D430, PAL_B/R/G, FD37
@@ -206,8 +233,14 @@ export class Display {
 
     /** Get the VRAM array for the active (write) page */
     _getActiveVram() {
-        // In 262K / 400-line mode, subramVramBank selects among 3 banks
+        // In 262K / 400-line mode, subramVramBank selects plane bank (0-2),
+        // blockActive ($D433 bit0, AV40EX/SX 2-page mode) selects front/back block.
         if (this.displayMode === DISPLAY_MODE_262K || this.displayMode === DISPLAY_MODE_400) {
+            if (this.blockActive === 1) {
+                if (this.subramVramBank === 2) return this.vramPage5;
+                if (this.subramVramBank === 1) return this.vramPage4;
+                return this.vramPage3;
+            }
             if (this.subramVramBank === 2) return this.vramPage2;
             if (this.subramVramBank === 1) return this.vramPage1;
             return this.vram;
@@ -238,7 +271,9 @@ export class Display {
             return 0xFF;
         }
         if (this.displayMode === DISPLAY_MODE_400) {
-            const pages = [this.vram, this.vramPage1, this.vramPage2];
+            const pages = this.blockActive === 1
+                ? [this.vramPage3, this.vramPage4, this.vramPage5]
+                : [this.vram, this.vramPage1, this.vramPage2];
             return pages[plane][offset & (PLANE_SIZE_400 - 1)];
         }
         const vram = this._getActiveVram();
@@ -258,14 +293,18 @@ export class Display {
             return;
         }
         if (this.displayMode === DISPLAY_MODE_400) {
-            const pages = [this.vram, this.vramPage1, this.vramPage2];
+            const pages = this.blockActive === 1
+                ? [this.vramPage3, this.vramPage4, this.vramPage5]
+                : [this.vram, this.vramPage1, this.vramPage2];
             const vram = pages[plane];
             const rawOffset = offset & (PLANE_SIZE_400 - 1);
             if (vram[rawOffset] !== dat) {
                 vram[rawOffset] = dat;
-                const line = (rawOffset / BYTES_PER_LINE) | 0;
-                if (line < SCREEN_HEIGHT_400) {
-                    this._dirtyBands[(line >> 3)] = 1;
+                if (this.blockActive === this.blockDisplay) {
+                    const line = (rawOffset / BYTES_PER_LINE) | 0;
+                    if (line < SCREEN_HEIGHT_400) {
+                        this._dirtyBands[(line >> 3)] = 1;
+                    }
                 }
             }
             return;
@@ -600,11 +639,12 @@ export class Display {
 
         // Calculate VRAM byte address from (x, y) coordinates
         let addr;
-        if (this.displayMode === DISPLAY_MODE_320) {
-            // 320x200 analog mode: 40 bytes per line
+        if (this.displayMode === DISPLAY_MODE_320 ||
+            this.displayMode === DISPLAY_MODE_262K) {
+            // 320x200 analog / 262K-color mode: 40 bytes per line
             addr = (y * BYTES_PER_LINE_320 + (x >> 3)) & 0xFFFF;
         } else {
-            // 640x200 digital mode: 80 bytes per line
+            // 640x200 / 640x400 digital mode: 80 bytes per line
             addr = (y * BYTES_PER_LINE + (x >> 3)) & 0xFFFF;
         }
 
@@ -779,9 +819,12 @@ export class Display {
             const vram = this._getActiveVram();
             if (vram[addr] !== value) {
                 vram[addr] = value;
-                const line = (addr / BYTES_PER_LINE) | 0;
-                if (line < SCREEN_HEIGHT_400) {
-                    this._dirtyBands[(line >> 3)] = 1;
+                // Only mark display dirty when writing to the currently-displayed block
+                if (this.blockActive === this.blockDisplay) {
+                    const line = (addr / BYTES_PER_LINE) | 0;
+                    if (line < SCREEN_HEIGHT_400) {
+                        this._dirtyBands[(line >> 3)] = 1;
+                    }
                 }
             }
             return;
@@ -1169,22 +1212,15 @@ export class Display {
     _vramScroll(offset) {
         this._pushScrollTrace('SCROLL', { diff: offset & 0xFFFF });
 
-        const buf = this._scrollBuf;
-
-        if (this.displayMode === DISPLAY_MODE_400) {
-            // 400-line: 3 separate 32KB planes, scroll each
-            // Contiguous layout: offset is used directly without doubling.
-            offset &= (PLANE_SIZE_400 - 1);
-            if (offset === 0) return;
-            for (const page of [this.vram, this.vramPage1, this.vramPage2]) {
-                buf.set(page.subarray(0, offset));
-                page.copyWithin(0, offset, PLANE_SIZE_400);
-                page.set(buf.subarray(0, offset), PLANE_SIZE_400 - offset);
-            }
+        // 400-line / 262K: renderer applies per-byte offset transform at read
+        // time (see _render640x400 / _render320x200_262k). No physical rotation.
+        if (this.displayMode === DISPLAY_MODE_400 ||
+            this.displayMode === DISPLAY_MODE_262K) {
             this._fullDirty = true;
             return;
         }
 
+        const buf = this._scrollBuf;
         const vram = this._getActiveVram();
 
         if (this.displayMode === DISPLAY_MODE_320) {
@@ -1214,9 +1250,33 @@ export class Display {
 
     /** Get the display page's VRAM offset (for rendering) */
     getDisplayVramOffset() {
-        // With physical rotation, VRAM[0] is always screen top.
-        // Renderer does not apply any offset.
+        // 200-line and 4096-color modes physically rotate VRAM at scroll time,
+        // so the renderer reads from offset 0. 400-line / 262K modes apply the
+        // offset at read time (see _transformAddr).
         return 0;
+    }
+
+    /**
+     * Compute the physical VRAM read address for a given logical byte address,
+     * given the current display mode and scroll offset. The offset wraps within
+     * the plane/sub-plane boundary; upper bits (plane/sub-plane selector) are
+     * preserved.
+     * @param {number} addr - logical byte address (includes plane base offset)
+     * @param {number} vramOffset - 14-bit scroll offset ($D40E/$D40F)
+     * @returns {number} physical address into the plane/sub-plane
+     */
+    _transformAddr(addr, vramOffset) {
+        switch (this.displayMode) {
+            case DISPLAY_MODE_640:   // 640x200 8-color: 16KB plane wrap
+                return (addr & ~0x3FFF) | ((addr + vramOffset) & 0x3FFF);
+            case DISPLAY_MODE_320:   // 320x200 4096-color: 8KB sub-plane wrap
+                return (addr & ~0x1FFF) | ((addr + vramOffset) & 0x1FFF);
+            case DISPLAY_MODE_262K:  // 320x200 262K-color: 8KB sub-plane wrap
+                return (addr & ~0x1FFF) | ((addr + vramOffset) & 0x1FFF);
+            case DISPLAY_MODE_400:   // 640x400 8-color: 32KB plane wrap, offset *2
+                return (addr & ~0x7FFF) | ((addr + vramOffset * 2) & 0x7FFF);
+        }
+        return addr;
     }
 
     // ---------------------------------------------------------------
@@ -1316,7 +1376,8 @@ export class Display {
     }
 
     _render640x200(canvas, force = false) {
-        if (this._canvas !== canvas || !this._ctx) {
+        if (this._canvas !== canvas || !this._ctx ||
+            canvas.width !== SCREEN_WIDTH || canvas.height !== SCREEN_HEIGHT) {
             this._canvas = canvas;
             canvas.width = SCREEN_WIDTH;
             canvas.height = SCREEN_HEIGHT;
@@ -1391,7 +1452,8 @@ export class Display {
     }
 
     _render320x200(canvas, force = false) {
-        if (this._canvas !== canvas || !this._ctx) {
+        if (this._canvas !== canvas || !this._ctx ||
+            canvas.width !== SCREEN_WIDTH || canvas.height !== SCREEN_HEIGHT) {
             this._canvas = canvas;
             canvas.width = SCREEN_WIDTH;
             canvas.height = SCREEN_HEIGHT;
@@ -1406,8 +1468,9 @@ export class Display {
         }
 
         const pixels = this._pixelBuf;
-        const page0 = this.vram;
-        const page1 = this.vramPage1;
+        // 4096-color 2-page (AV40/AV40EX/SX) selects front/back via blockDisplay ($D433 bit4).
+        const page0 = this.blockDisplay === 1 ? this.vramPage3 : this.vram;
+        const page1 = this.blockDisplay === 1 ? this.vramPage4 : this.vramPage1;
         const pal = this._resolvedAnalogPalette;
 
         // FM77AV 320x200, 4096-color mode:
@@ -1478,7 +1541,8 @@ export class Display {
     }
 
     _render320x200_262k(canvas, force = false) {
-        if (this._canvas !== canvas || !this._ctx) {
+        if (this._canvas !== canvas || !this._ctx ||
+            canvas.width !== SCREEN_WIDTH || canvas.height !== SCREEN_HEIGHT) {
             this._canvas = canvas;
             canvas.width = SCREEN_WIDTH;
             canvas.height = SCREEN_HEIGHT;
@@ -1489,36 +1553,47 @@ export class Display {
         }
 
         const pixels = this._pixelBuf;
-        const page0 = this.vram;
-        const page1 = this.vramPage1;
-        const page2 = this.vramPage2;
+        // 262,144-color mode uses 3 banks for bit-precision; AV40EX/SX can also
+        // select front/back via blockDisplay ($D433 bit4, 2-page 262K).
+        const page0 = this.blockDisplay === 1 ? this.vramPage3 : this.vram;
+        const page1 = this.blockDisplay === 1 ? this.vramPage4 : this.vramPage1;
+        const page2 = this.blockDisplay === 1 ? this.vramPage5 : this.vramPage2;
+        // Per-bank scroll offset (no physical rotation): extends 4096-color
+        // pattern (bank0/1 → offset[0]/[1]) with bank 2 sharing offset[0].
+        // Wrap within 8KB sub-plane boundary.
+        const ofsB0 = this.vramOffset[0];
+        const ofsB1 = this.vramOffset[1];
+        const ofsB2 = this.vramOffset[0];
 
         // 262,144-color mode: 18 sub-planes (6 per channel), 320x200
         // Each channel has 6 bits -> 64 levels, mapped to 0-255 via LUT
-        // Sub-plane layout per page (each sub-plane = 0x2000 bytes):
-        //   page0: B5,B4 (Blue[0x0000]), R5,R4 (Red[0x4000]), G5,G4 (Green[0x8000])
-        //   page1: B3,B2 (Blue[0x0000]), R3,R2 (Red[0x4000]), G3,G2 (Green[0x8000])
-        //   page2: B1,B0 (Blue[0x0000]), R1,R0 (Red[0x4000]), G1,G0 (Green[0x8000])
+        // Sub-plane layout per bank (each sub-plane = 0x2000 bytes):
+        //   bank0 (page0): B5,B4 (Blue[0x0000]), R5,R4 (Red[0x4000]), G5,G4 (Green[0x8000])
+        //   bank1 (page1): B3,B2 (Blue[0x0000]), R3,R2 (Red[0x4000]), G3,G2 (Green[0x8000])
+        //   bank2 (page2): B1,B0 (Blue[0x0000]), R1,R0 (Red[0x4000]), G1,G0 (Green[0x8000])
 
         for (let y = 0; y < SCREEN_HEIGHT; y++) {
             const lineOfs = y * BYTES_PER_LINE_320;
             const pixelRow = y * SCREEN_WIDTH;
 
             for (let byteX = 0; byteX < BYTES_PER_LINE_320; byteX++) {
-                const ofs = lineOfs + byteX;
+                const logical = lineOfs + byteX;
+                const a0 = (logical + ofsB0) & 0x1FFF;
+                const a1 = (logical + ofsB1) & 0x1FFF;
+                const a2 = (logical + ofsB2) & 0x1FFF;
 
-                // Read 18 sub-plane bytes (6 per channel, 2 per page)
-                const b5 = page0[0x0000 + ofs], b4 = page0[0x2000 + ofs];
-                const b3 = page1[0x0000 + ofs], b2 = page1[0x2000 + ofs];
-                const b1 = page2[0x0000 + ofs], b0 = page2[0x2000 + ofs];
+                // Read 18 sub-plane bytes (6 per channel, 2 per bank)
+                const b5 = page0[0x0000 + a0], b4 = page0[0x2000 + a0];
+                const b3 = page1[0x0000 + a1], b2 = page1[0x2000 + a1];
+                const b1 = page2[0x0000 + a2], b0 = page2[0x2000 + a2];
 
-                const r5 = page0[0x4000 + ofs], r4 = page0[0x6000 + ofs];
-                const r3 = page1[0x4000 + ofs], r2 = page1[0x6000 + ofs];
-                const r1 = page2[0x4000 + ofs], r0 = page2[0x6000 + ofs];
+                const r5 = page0[0x4000 + a0], r4 = page0[0x6000 + a0];
+                const r3 = page1[0x4000 + a1], r2 = page1[0x6000 + a1];
+                const r1 = page2[0x4000 + a2], r0 = page2[0x6000 + a2];
 
-                const g5 = page0[0x8000 + ofs], g4 = page0[0xA000 + ofs];
-                const g3 = page1[0x8000 + ofs], g2 = page1[0xA000 + ofs];
-                const g1 = page2[0x8000 + ofs], g0 = page2[0xA000 + ofs];
+                const g5 = page0[0x8000 + a0], g4 = page0[0xA000 + a0];
+                const g3 = page1[0x8000 + a1], g2 = page1[0xA000 + a1];
+                const g1 = page2[0x8000 + a2], g0 = page2[0xA000 + a2];
 
                 for (let bit = 7; bit >= 0; bit--) {
                     // 6-bit value per channel (bit 5 = MSB from page0 sub0)
@@ -1552,7 +1627,8 @@ export class Display {
     }
 
     _render640x400(canvas, force = false) {
-        if (this._canvas !== canvas || !this._ctx) {
+        if (this._canvas !== canvas || !this._ctx ||
+            canvas.width !== SCREEN_WIDTH || canvas.height !== SCREEN_HEIGHT_400) {
             this._canvas = canvas;
             canvas.width = SCREEN_WIDTH;
             canvas.height = SCREEN_HEIGHT_400;
@@ -1573,11 +1649,27 @@ export class Display {
         }
 
         const pixels = this._pixelBuf;
-        // 400-line: 3 planes in separate VRAM pages, 32KB each
-        const blue  = this.vram;
-        const red   = this.vramPage1;
-        const green = this.vramPage2;
+        // 400-line: 3 planes in separate VRAM banks, 32KB each.
+        // blockDisplay ($D433 bit4) selects front (0) / back (1) block on AV40EX/SX.
+        const frontB = this.vram,      frontR = this.vramPage1, frontG = this.vramPage2;
+        const backB  = this.vramPage3, backR  = this.vramPage4, backG  = this.vramPage5;
+        const primB = this.blockDisplay === 1 ? backB : frontB;
+        const primR = this.blockDisplay === 1 ? backR : frontR;
+        const primG = this.blockDisplay === 1 ? backG : frontG;
+        const altB  = this.blockDisplay === 1 ? frontB : backB;
+        const altR  = this.blockDisplay === 1 ? frontR : backR;
+        const altG  = this.blockDisplay === 1 ? frontG : backG;
         const pal   = this._resolvedPalette;
+        // Per-byte offset transform: byteX parity picks between the two
+        // scroll offsets. Offset *2 and wrap within 32KB plane.
+        const ofs0 = this.vramOffset[0];
+        const ofs1 = this.vramOffset[1];
+        // Hardware window ($D438-$D43F): inside the rectangle, swap to alt block.
+        const winOpen = this.windowOpen;
+        const winFx = this.windowX1 >> 3;
+        const winLx = this.windowX2 >> 3;
+        const winY1 = this.windowY1;
+        const winY2 = this.windowY2;
 
         for (let band = 0; band < 50; band++) {
             if (!needFull && !this._dirtyBands[band]) continue;
@@ -1588,9 +1680,16 @@ export class Display {
             for (let y = yStart; y < yEnd; y++) {
                 const lineBase = y * BYTES_PER_LINE;
                 const pixelRow = y * SCREEN_WIDTH;
+                const inWinY = winOpen && (y >= winY1) && (y < winY2);
 
                 for (let byteX = 0; byteX < BYTES_PER_LINE; byteX++) {
-                    const byteAddr = lineBase + byteX;
+                    const logical = lineBase + byteX;
+                    const ofs = (byteX & 1) ? ofs1 : ofs0;
+                    const byteAddr = (logical + ofs * 2) & 0x7FFF;
+                    const useAlt = inWinY && (byteX >= winFx) && (byteX < winLx);
+                    const blue  = useAlt ? altB : primB;
+                    const red   = useAlt ? altR : primR;
+                    const green = useAlt ? altG : primG;
                     const bByte = (this.multiPage & 0x10) ? 0 : blue [byteAddr];
                     const rByte = (this.multiPage & 0x20) ? 0 : red  [byteAddr];
                     const gByte = (this.multiPage & 0x40) ? 0 : green[byteAddr];
@@ -1666,6 +1765,9 @@ export class Display {
         this.vram.fill(0);
         this.vramPage1.fill(0);
         this.vramPage2.fill(0);
+        this.vramPage3.fill(0);
+        this.vramPage4.fill(0);
+        this.vramPage5.fill(0);
         this._fullDirty = true;
     }
 
@@ -1716,6 +1818,13 @@ export class Display {
         this.frameCount = 0;
         this.activeVramPage = 0;
         this.displayVramPage = 0;
+        this.blockActive = 0;
+        this.blockDisplay = 0;
+        this.windowX1 = 0;
+        this.windowX2 = 0;
+        this.windowY1 = 0;
+        this.windowY2 = 0;
+        this.windowOpen = false;
         this.displayMode = DISPLAY_MODE_640;
         this._mode320Flag = false;
         this.multiPage = 0;

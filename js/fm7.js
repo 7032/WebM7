@@ -1458,7 +1458,8 @@ export class FM7 {
                 if (this._rtcAck) { val &= ~0x01; this._rtcAck = false; }
                 return val;
             }
-            // $D433-$D43F: Other FM77AV registers
+            // $D433: AV40EX VRAM block select (write-only — reads return $FF)
+            // $D434-$D43F: Other FM77AV registers
             return 0xFF;
         }
 
@@ -1688,7 +1689,45 @@ export class FM7 {
                 return;
             }
             // $D432: Key encoder status (read-only, writes ignored)
-            // $D433-$D43F: Other FM77AV registers
+            // $D433: AV40EX VRAM block select — selects front/back block for 2-page
+            // 400-line / 262K / 4096-color modes.
+            //   bit 0: active block (write target: 0=front, 1=back)
+            //   bit 4: display block (renderer source: 0=front, 1=back)
+            if (addr === 0xD433 && this.isAV40EX) {
+                const newActive  = val & 0x01;
+                const newDisplay = (val >> 4) & 0x01;
+                if (this.display.blockDisplay !== newDisplay) {
+                    this.display.blockDisplay = newDisplay;
+                    this.display._fullDirty = true;
+                }
+                this.display.blockActive = newActive;
+                return;
+            }
+            // $D438-$D43F: AV40EX hardware window (8-byte window-coord register file)
+            // Inside the rectangle [x1,x2) × [y1,y2), renderer reads from the
+            // *alternate* block (swapped w.r.t. blockDisplay). Used by programs
+            // that split decoration (front) and dynamic content (back).
+            //   $D438 X1 hi (bits 0-1 → X bit8-9)    $D439 X1 lo (bits 3-7 → X bit3-7, bit0-2 = 0)
+            //   $D43A X2 hi                            $D43B X2 lo
+            //   $D43C Y1 hi (bit 0 → Y bit8)          $D43D Y1 lo (bit 0-7)
+            //   $D43E Y2 hi                            $D43F Y2 lo
+            if (addr >= 0xD438 && addr <= 0xD43F && this.isAV40EX) {
+                const d = this.display;
+                switch (addr & 7) {
+                    case 0: d.windowX1 = (d.windowX1 & 0x00F8) | ((val & 0x03) << 8); break;
+                    case 1: d.windowX1 = (d.windowX1 & 0x0300) | (val & 0xF8);        break;
+                    case 2: d.windowX2 = (d.windowX2 & 0x00F8) | ((val & 0x03) << 8); break;
+                    case 3: d.windowX2 = (d.windowX2 & 0x0300) | (val & 0xF8);        break;
+                    case 4: d.windowY1 = (d.windowY1 & 0x00FF) | ((val & 0x01) << 8); break;
+                    case 5: d.windowY1 = (d.windowY1 & 0x0100) | val;                 break;
+                    case 6: d.windowY2 = (d.windowY2 & 0x00FF) | ((val & 0x01) << 8); break;
+                    case 7: d.windowY2 = (d.windowY2 & 0x0100) | val;                 break;
+                }
+                d.windowOpen = (d.windowX1 < d.windowX2) && (d.windowY1 < d.windowY2);
+                d._fullDirty = true;
+                return;
+            }
+            // $D434-$D437: Other FM77AV registers
             return;
         }
 
