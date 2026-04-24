@@ -983,6 +983,13 @@ export class FM7 {
                         this._mainIOWrite(FD13_SUB_BANK, SUB_MONITOR_C);
                         this.keyboard._enableBreakCodes = false;
                         this.keyboard._useScanCodes = false;
+                    } else {
+                        // DOS boot: real INITIATE.ROM clears $FD0F (CLR <$0F)
+                        // during its DOS path, disabling the BASIC ROM overlay
+                        // so user programs can freely use $8000-$FBFF including
+                        // a stack at $FBFF. DevM7's patched INITIATE may skip
+                        // the code path that does this — apply it explicitly.
+                        this._basicRomEnabled = false;
                     }
                     console.log('FM77AV: Initiator overlay handoff complete');
                 }
