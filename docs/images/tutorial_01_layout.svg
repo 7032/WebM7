@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 520" width="880" height="520">
+  <title>WebM7 メイン画面のレイアウト見取り図。左にエミュレータ画面、右にサイドパネル</title>
+  <defs>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="880" height="520" fill="#ffffff"/>
+  <text x="440" y="30" font-family="sans-serif" font-size="18" font-weight="bold" fill="#1f2328" text-anchor="middle">メイン画面のレイアウト（左右 2 カラム）</text>
+
+  <!-- 左カラム -->
+  <rect x="24" y="52" width="520" height="400" rx="8" fill="#f6f8fa" stroke="#0969da" stroke-width="1.5"/>
+  <text x="284" y="78" font-family="sans-serif" font-size="15" font-weight="bold" fill="#0969da" text-anchor="middle">左カラム — エミュレータ画面</text>
+
+  <!-- Screen -->
+  <rect x="56" y="94" width="456" height="216" rx="8" fill="#1f2328" stroke="#0969da" stroke-width="1.5"/>
+  <text x="284" y="190" font-family="sans-serif" font-size="16" font-weight="bold" fill="#7ee787" text-anchor="middle">Screen（640×200）</text>
+  <text x="284" y="216" font-family="sans-serif" font-size="13" fill="#d0d7de" text-anchor="middle">クリックするとキー入力が渡ります</text>
+
+  <!-- ツールバー1行目 -->
+  <rect x="56" y="322" width="456" height="48" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="284" y="342" font-family="sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="middle">音量 ／ ステータスバー（2 段） ／ FULL</text>
+  <text x="284" y="360" font-family="sans-serif" font-size="12" fill="#57606a" text-anchor="middle">LED・キー状態・ドライブ・fps・解像度（→ 8 章）</text>
+
+  <!-- ツールバー2行目 -->
+  <rect x="56" y="382" width="456" height="44" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+  <text x="284" y="401" font-family="sans-serif" font-size="13" font-weight="bold" fill="#1f2328" text-anchor="middle">Debug Panels</text>
+  <text x="284" y="418" font-family="sans-serif" font-size="12" fill="#57606a" text-anchor="middle">CPU / Memory / Keyboard / Palette / Sound / Input</text>
+
+  <!-- 右カラム -->
+  <rect x="572" y="52" width="284" height="400" rx="8" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="714" y="78" font-family="sans-serif" font-size="15" font-weight="bold" fill="#1a7f37" text-anchor="middle">右カラム — サイドパネル</text>
+
+  <rect x="592" y="94" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="114" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">Control</text>
+  <text x="714" y="132" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">Power / Machine / Boot Mode（→ 4 章）</text>
+
+  <rect x="592" y="150" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="170" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">ROM Files</text>
+  <text x="714" y="188" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">ROM の読み込み（→ 3 章）</text>
+
+  <rect x="592" y="206" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="226" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">Library</text>
+  <text x="714" y="244" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">仮想メディアの棚（→ 5 章）</text>
+
+  <rect x="592" y="262" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="282" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">Disk Images</text>
+  <text x="714" y="300" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">Drive 0 / Drive 1（→ 5 章）</text>
+
+  <rect x="592" y="318" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="338" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">Tape Image</text>
+  <text x="714" y="356" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">T77 / WAV テープ（→ 6 章）</text>
+
+  <rect x="592" y="374" width="244" height="48" rx="8" fill="#dafbe1" stroke="#1a7f37"/>
+  <text x="714" y="394" font-family="sans-serif" font-size="14" font-weight="bold" fill="#1f2328" text-anchor="middle">BASIC Paste</text>
+  <text x="714" y="412" font-family="sans-serif" font-size="11" fill="#57606a" text-anchor="middle">テキスト自動入力（→ 7 章）</text>
+
+  <!-- フッター -->
+  <rect x="24" y="468" width="832" height="38" rx="8" fill="#fff8c5" stroke="#bc4c00"/>
+  <text x="440" y="492" font-family="sans-serif" font-size="13" fill="#1f2328" text-anchor="middle">画面最下部: 「マニュアル」「T77 SAVE/LOAD」「WAV LOAD/SAVE」「更新履歴」などのリンク</text>
+</svg>

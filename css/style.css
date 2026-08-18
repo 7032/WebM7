@@ -1,0 +1,1643 @@
+/* SPDX-License-Identifier: MIT */
+/* Copyright (c) 2026 7032 / Naomitsu Tsugiiwa */
+/* ===== Reset & Base ===== */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: #1a1a2e;
+    color: #c8c8d0;
+    font-family: 'Courier New', 'Consolas', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ===== Main Layout (horizontal) ===== */
+.main-layout {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 12px;
+}
+
+/* ===== Left Column: Screen + Toolbar ===== */
+.left-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+/* ===== Screen Container ===== */
+.screen-container {
+    position: relative;
+    padding: 16px;
+    background: #0a0a14;
+    border: 3px solid #333;
+    border-radius: 12px;
+    box-shadow:
+        0 0 20px rgba(0, 0, 0, 0.8),
+        inset 0 0 40px rgba(0, 0, 0, 0.5);
+}
+
+.screen-container::before {
+    content: '';
+    position: absolute;
+    top: 4px; left: 4px; right: 4px; bottom: 4px;
+    border-radius: 10px;
+    border: 2px solid #222;
+    pointer-events: none;
+    z-index: 1;
+}
+
+canvas#screen {
+    display: block;
+    width: 640px;
+    height: 400px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #000;
+    border-radius: 4px;
+}
+
+.scanlines {
+    position: absolute;
+    top: 16px; left: 16px;
+    width: 640px;
+    height: 400px;
+    border-radius: 4px;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 1px,
+        rgba(0, 0, 0, 0.15) 1px,
+        rgba(0, 0, 0, 0.15) 2px
+    );
+    mix-blend-mode: multiply;
+    z-index: 2;
+}
+
+/* ===== Toolbar ===== */
+.toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 672px;
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 6px;
+}
+
+.toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.toolbar-debug {
+    margin-top: 4px;
+    justify-content: flex-start;
+}
+
+.toolbar-debug-label {
+    margin-right: 4px;
+    color: #8899aa;
+    font-weight: bold;
+}
+
+.toolbar button {
+    font-family: inherit;
+    font-size: 0.8em;
+    padding: 4px 10px;
+    border: 1px solid #4a5a7a;
+    border-radius: 4px;
+    cursor: pointer;
+    background: #2a3a5a;
+    color: #c8c8d0;
+    transition: background 0.15s;
+}
+
+.toolbar button:hover { background: #3a4a6a; }
+
+.toolbar button.active {
+    background: #0a4a2a;
+    color: #00ee77;
+    border-color: #00cc66;
+}
+
+.vol-label {
+    font-size: 0.75em;
+    color: #6688aa;
+}
+
+/* Volume button as a speaker icon (minimal chrome) */
+.toolbar button.vol-btn {
+    padding: 2px 6px;
+    font-size: 1em;
+    line-height: 1;
+    background: transparent;
+    border-color: transparent;
+}
+.toolbar button.vol-btn:hover {
+    background: #2a3a5a;
+    border-color: #4a5a7a;
+}
+
+/* ===== Status bar (bottom toolbar) — explicit two-row stack ===== */
+.toolbar-status {
+    flex-direction: column;
+    align-items: flex-start;   /* both rows share the same left edge */
+    gap: 5px;
+}
+/* Each row lays its groups out horizontally, left-aligned so the two rows'
+   left edges line up. LEDs sit at the left and never move; the variable
+   readouts to their right reserve a fixed width so changing values (sector
+   count, key code, fps, display mode) cannot push neighbours left or right.
+   On narrow widths a row may wrap without hiding info. */
+.status-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 16px;
+}
+.status-leds {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;   /* LED group keeps a stable size; never squeezed */
+}
+.status-readout {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+/* Width reservations for the variable-length readouts. Each value is left
+   aligned inside a fixed-min box sized to its longest expected content, with
+   tabular figures so digit-count changes do not alter the rendered width. The
+   box itself does not grow or shrink, so its neighbours stay put. */
+.status-readout .vol-label,
+.fdc-track-info {
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    flex: 0 0 auto;
+    display: inline-block;
+}
+/* T:### S:### STATE  (track/sector up to 3 digits, state up to 4 chars) */
+#fdcTrackInfo { min-width: 108px; }
+/* key code "$XX" (default "--") */
+#tbKeyLabel   { min-width: 28px; }
+/* keyboard mode "ASCII" / "SCAN" */
+#tbKbdMode    { min-width: 38px; }
+/* "60 fps" (default "--") */
+#fpsLabel     { min-width: 44px; }
+/* longest: "640x400 / 262144色" */
+#dispModeLabel { min-width: 132px; }
+.status-led-item {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.status-led-name {
+    font-size: 10px;
+    color: #888;
+}
+/* FDC Track/Sector/state readout sitting next to the drive LEDs */
+.fdc-track-info {
+    font-size: 10px;
+    color: #6688aa;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    margin-left: 2px;
+}
+.status-divider {
+    display: inline-block;
+    width: 0;
+    height: 14px;
+    border-left: 1px solid #3a4660;
+    margin: 0 2px;
+}
+/* Shift / Ctrl / GRPH: subtle text pills (NOT round LEDs) */
+.status-pills {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.mod-pill {
+    font-size: 9px;
+    line-height: 1;
+    letter-spacing: 0.5px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: 1px solid #3a4660;
+    color: #5a6680;
+    background: #1a2540;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.mod-pill.on {
+    color: #0c0f18;
+    background: #00cc66;
+    border-color: #00ee77;
+    font-weight: bold;
+}
+
+input[type="range"]#volumeSlider {
+    width: 80px;
+    height: 4px;
+    accent-color: #00cc66;
+    cursor: pointer;
+}
+
+/* ===== Right Column: Side Panel ===== */
+.side-panel {
+    width: 320px;
+    min-width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* max-height is managed by fitMainLayout() (JS) so the panel scrolls
+       within the scaled viewport; this calc is the pre-scale fallback. */
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.side-panel::-webkit-scrollbar {
+    width: 4px;
+}
+
+.side-panel::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 2px;
+}
+
+.sp-section {
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow: hidden;
+    flex-shrink: 0;
+    box-sizing: border-box;
+}
+
+.sp-section h3 {
+    font-size: 0.8em;
+    color: #4ea8de;
+    margin-bottom: 6px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid #2a2a4a;
+}
+
+/* Collapsible section header */
+.sp-section h3.sp-section-toggle {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    padding-right: 16px;
+}
+.sp-section h3.sp-section-toggle::after {
+    content: '▼';
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.7em;
+    color: #6a8eb8;
+    transition: transform 0.15s ease;
+}
+.sp-section.collapsed h3.sp-section-toggle::after {
+    transform: translateY(-50%) rotate(-90deg);
+}
+.sp-section.collapsed > *:not(h3) {
+    display: none !important;
+}
+/* Inline help icon next to a section title. Click opens the main help modal
+   and scrolls to the matching section anchor. */
+.sp-section h3 .help-icon {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    border-radius: 50%;
+    background: #2a3a55;
+    color: #aac;
+    font-size: 11px;
+    font-weight: bold;
+    margin-left: 6px;
+    cursor: help;
+    user-select: none;
+    vertical-align: middle;
+}
+.sp-section h3 .help-icon:hover {
+    background: #4a6088;
+    color: #fff;
+}
+.sp-section.collapsed {
+    margin-bottom: 0;
+}
+
+.sp-section label {
+    display: inline-flex;
+    font-size: 0.75em;
+    color: #8899aa;
+    margin-bottom: 3px;
+}
+
+/* File inputs */
+input[type="file"] {
+    font-family: inherit;
+    font-size: 0.7em;
+    color: #c8c8d0;
+    background: #0d1b2a;
+    border: 1px solid #2a3a5a;
+    border-radius: 4px;
+    padding: 2px 4px;
+    cursor: pointer;
+    max-width: 100%;
+}
+
+input[type="file"]::file-selector-button {
+    background: #2a3a5a;
+    color: #c8c8d0;
+    border: 1px solid #4a5a7a;
+    border-radius: 3px;
+    padding: 1px 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.9em;
+    margin-right: 4px;
+}
+
+input[type="file"]::file-selector-button:hover {
+    background: #3a4a6a;
+}
+
+/* ROM list */
+.rom-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.rom-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.rom-item .rom-name {
+    font-size: 0.7em;
+    color: #6688aa;
+    min-width: 82px;
+    flex-shrink: 0;
+}
+
+.rom-item input[type="file"] {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+
+/* FM77AV ROM list separator */
+.rom-list-av label {
+    font-size: 0.72em;
+    padding-top: 4px;
+    border-top: 1px solid #2a2a4a;
+}
+
+/* === Machine capability badges (Control panel) === */
+.cap-badge-row {
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 2px;
+}
+.cap-badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    padding: 1px 6px;
+    border-radius: 8px;
+    border: 1px solid #444;
+    color: #555;
+    background: #1c1c1c;
+    user-select: none;
+}
+.cap-badge.cap-on {
+    color: #ffd54a;
+    border-color: #8a6d1a;
+    background: #33290e;
+}
+.cap-mem {
+    font-size: 0.68rem;
+    color: #9ab;
+    margin-left: 4px;
+    white-space: nowrap;
+}
+.cap-compare-link {
+    font-size: 0.68rem;
+    margin-left: 4px;
+    color: #7fb4e6;
+}
+
+/* === Required / Optional badges for ROM files === */
+.rom-badge {
+    display: inline-block;
+    font-size: 0.62rem;
+    line-height: 1.3;
+    padding: 0 4px;
+    border-radius: 3px;
+    margin-left: 2px;
+    vertical-align: middle;
+    font-weight: bold;
+    white-space: nowrap;
+}
+.rom-badge-req {
+    background: #5a1e1e;
+    color: #ff9c9c;
+    border: 1px solid #8a3a3a;
+}
+.rom-badge-opt {
+    background: #23303f;
+    color: #7fa6c4;
+    border: 1px solid #38506a;
+}
+/* Subtle tint on the whole row so required items stand out at a glance. */
+.rom-item[data-req="required"] .rom-name { color: #c0d4e8; }
+.rom-item[data-req="optional"] .rom-name { color: #5d7790; }
+
+/* === Inline guidance / save-model notes === */
+.rom-guide,
+.sp-guide,
+.save-note,
+.rec-label {
+    font-size: 0.68rem;
+    line-height: 1.4;
+    color: #7d93ab;
+    margin: 2px 0 6px;
+}
+.save-note {
+    color: #6fa3c8;
+    background: #15273a;
+    border-left: 3px solid #2f6f9e;
+    padding: 4px 6px;
+    border-radius: 3px;
+}
+.rec-label {
+    color: #c8a45a;
+    margin-top: 8px;
+    margin-bottom: 3px;
+    font-weight: bold;
+}
+.rom-guide strong,
+.sp-guide strong,
+.save-note strong { color: #cfe2f2; }
+
+/* Library insert buttons: a touch more emphasis. */
+.lib-ins-btn { color: #8fd0a0; }
+
+/* Dimmed (no-content) state for the tape recording buttons. */
+button.rec-empty {
+    opacity: 0.42;
+    filter: grayscale(0.6);
+}
+
+/* Icon + text button structure: on desktop the icon is hidden, text shows. */
+.btn-icon { display: none; }
+.btn-text { display: inline; }
+
+/* Status tag */
+.status-tag {
+    font-size: 0.7em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #2a2a4a;
+    color: #666;
+    flex-shrink: 0;
+}
+
+.status-tag.loaded {
+    background: #0a3a1a;
+    color: #00cc66;
+}
+
+/* File name row (shown below file input) */
+.file-name-row {
+    font-size: 0.75em;
+    color: #666;
+    padding: 2px 4px 4px 4px;
+    margin-top: 2px;
+    word-break: break-all;
+    line-height: 1.2;
+}
+.file-name-row.loaded {
+    color: #00cc66;
+}
+
+/* Inserted-disk geometry summary (2D/2DD + CHRN) under each drive row */
+.disk-geom {
+    font-size: 0.72em;
+    color: #557;
+    padding: 0 4px 2px 4px;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+}
+.disk-geom.loaded {
+    color: #66aacc;
+}
+
+/* FDC access LED */
+.fdc-led {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #333;
+    border: 1px solid #555;
+    transition: background 0.05s, box-shadow 0.05s;
+}
+.fdc-led.active {
+    /* 2D access = yellow (disk-mode colour; DMA adds fast blink) */
+    background: #ffcc22;
+    box-shadow: 0 0 6px 2px rgba(255, 204, 34, 0.6);
+    border-color: #ffdd55;
+}
+/* Drive-LED colour code (see #236):
+   yellow=2D read, white=2D DMA, green=2DD read, blue=2DD DMA, red=write */
+.fdc-led.active.led-white {
+    background: #f4f4f4;
+    border-color: #ffffff;
+    box-shadow: 0 0 6px 2px rgba(244, 244, 244, 0.65);
+}
+.fdc-led.active.led-blue {
+    background: #3388ff;
+    border-color: #66aaff;
+    box-shadow: 0 0 6px 2px rgba(51, 136, 255, 0.65);
+}
+.fdc-led.active.led-red {
+    background: #ff3322;
+    border-color: #ff6655;
+    box-shadow: 0 0 6px 2px rgba(255, 51, 34, 0.65);
+}
+/* Green variant: 2DD-mode disk read / high-speed MMR */
+.fdc-led.active.led-green {
+    background: #2ecc55;
+    border-color: #55e57f;
+    box-shadow: 0 0 6px 2px rgba(46, 204, 85, 0.6);
+}
+.fdc-led.motor {
+    background: #884422;
+    border-color: #996633;
+}
+
+/* Keyboard LED indicators */
+.kbd-led {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #333;
+    border: 1px solid #555;
+    transition: background 0.1s, box-shadow 0.1s;
+}
+.kbd-led.on {
+    background: #44dd44;
+    box-shadow: 0 0 5px 1px rgba(68, 221, 68, 0.5);
+    border-color: #66ee66;
+}
+
+/* Machine-specific LIT color for status-bar LEDs (CAPS/カナ/INS + Drv0/Drv1).
+   FM-7 = red, FM77AV family = yellow. Off state stays the shared default.
+   Scoped to .toolbar-status so the Disk/Keyboard panels keep their own colors. */
+body.machine-fm7 .toolbar-status .kbd-led.on {
+    background: #ff4422;
+    box-shadow: 0 0 5px 1px rgba(255, 68, 34, 0.55);
+    border-color: #ff6644;
+}
+body.machine-av .toolbar-status .kbd-led.on {
+    background: #ffcc22;
+    box-shadow: 0 0 5px 1px rgba(255, 204, 34, 0.55);
+    border-color: #ffdd55;
+}
+
+/* Radio buttons */
+.radio-group {
+    display: flex;
+    gap: 10px;
+}
+
+.radio-group label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    color: #c8c8d0;
+    font-size: 0.8em;
+}
+
+input[type="radio"] { accent-color: #00cc66; }
+/* Locked radio group: visually dimmed label but radio stays native */
+.radio-group.locked label { color: #6688aa; cursor: not-allowed; }
+.radio-group.locked input[type="radio"] { pointer-events: none; }
+
+/* Control rows */
+.ctrl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+    white-space: nowrap;
+}
+.ctrl-row > label:first-child {
+    margin: 0;
+}
+
+/* Buttons */
+.btn-row {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    margin-top: 4px;
+    align-items: center;
+}
+
+button {
+    font-family: inherit;
+    font-size: 0.75em;
+    padding: 3px 10px;
+    border: 1px solid #4a5a7a;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+/* Power toggle switch — slide switch with OFF [===O    ] ON style */
+.power-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.power-switch input { display: none; }
+
+/* OFF / ON labels beside the track */
+.power-label-off,
+.power-label-on {
+    font-size: 0.7em;
+    font-weight: bold;
+    line-height: 1;
+}
+
+.power-label-off { color: #cc6666; }
+.power-label-on  { color: #556655; }
+
+.power-switch input:checked ~ .power-label-off { color: #554444; }
+.power-switch input:checked ~ .power-label-on  { color: #00ee77; }
+
+/* Track (groove) */
+.power-track {
+    position: relative;
+    display: block;
+    width: 40px;
+    height: 20px;
+    background: linear-gradient(180deg, #111 0%, #222 40%, #1a1a1a 100%);
+    border: 2px solid #444;
+    border-radius: 4px;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8),
+                inset 0 -1px 1px rgba(255, 255, 255, 0.05);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Knob */
+.power-knob {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: linear-gradient(180deg, #bbb 0%, #888 40%, #999 100%);
+    border: 1px solid #aaa;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6),
+                inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    transition: left 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Knob grip lines */
+.power-knob::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    left: 5px;
+    width: 6px;
+    height: 8px;
+    background: repeating-linear-gradient(
+        180deg,
+        rgba(0, 0, 0, 0.25) 0px,
+        rgba(0, 0, 0, 0.25) 1px,
+        transparent 1px,
+        transparent 3px
+    );
+}
+
+/* Hover */
+.power-switch:hover .power-track {
+    border-color: #666;
+}
+
+/* === ON state === */
+.power-switch input:checked ~ .power-track {
+    border-color: #00aa55;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6),
+                0 0 6px rgba(0, 204, 102, 0.3);
+}
+
+.power-switch input:checked ~ .power-track .power-knob {
+    left: 21px;
+    background: linear-gradient(180deg, #55ffaa 0%, #00bb66 40%, #00dd77 100%);
+    border-color: #00ee77;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5),
+                0 0 8px rgba(0, 238, 119, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.power-switch input:checked ~ .power-track .power-knob::after {
+    background: repeating-linear-gradient(
+        180deg,
+        rgba(0, 0, 0, 0.2) 0px,
+        rgba(0, 0, 0, 0.2) 1px,
+        transparent 1px,
+        transparent 3px
+    );
+}
+
+/* Not-ready: required ROMs missing. Dim the switch to nudge ROM loading first.
+   Still clickable — the ROM-missing modal fires on click as a backup. */
+.power-switch.not-ready {
+    opacity: 0.45;
+    filter: grayscale(0.6);
+}
+
+/* Hint line shown under the Power switch while required ROMs are missing */
+.power-hint {
+    margin-top: 4px;
+    font-size: 0.7em;
+    color: #e8a848;
+    line-height: 1.3;
+}
+
+button.btn-stop {
+    background: #4a1a1a;
+    color: #ff6666;
+    border-color: #cc3333;
+}
+
+button.btn-stop:hover {
+    background: #5a2222;
+}
+
+button.btn-reset {
+    background: #3a3a1a;
+    color: #cccc66;
+    border-color: #aaaa44;
+}
+
+button.btn-screenshot {
+    background: #111;
+    border-color: #aaa;
+    font-size: 0.85em;
+    padding: 2px 6px;
+}
+button.btn-screenshot:hover {
+    background: #222;
+    border-color: #ccc;
+}
+
+button.btn-reset:hover {
+    background: #4a4a22;
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* ===== Side-panel action buttons & rows (#201) =====
+   All side-panel buttons share a readable, comfortably clickable size on
+   desktop, and grow to a 44px touch target on mobile (see media query).
+   Inline font-size/padding overrides were removed from the markup so these
+   rules apply uniformly. */
+.side-panel button {
+    font-size: 0.78em;
+    padding: 5px 12px;
+    min-height: 30px;
+    line-height: 1.2;
+}
+
+/* Rows holding a file input plus action buttons. flex-wrap ensures the
+   buttons (e.g. Save / Eject) wrap onto the next line instead of being
+   pushed off the edge and clipped when the row is narrow. */
+.sp-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+.sp-row > input[type="file"] {
+    flex: 1 1 12em;
+    min-width: 0;
+}
+.sp-row > button { flex: 0 0 auto; }
+
+/* Right-aligned maintenance buttons (Clear cache / Clear saved) */
+.sp-row.sp-row-end { justify-content: flex-end; }
+
+/* ===== Debug section ===== */
+.debug-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 8px;
+    font-size: 0.7em;
+}
+
+.debug-grid .d-label { color: #6688aa; }
+.debug-grid .d-val { color: #aaccee; }
+
+/* Palette swatches */
+.palette-row {
+    display: flex;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+.pal-swatch {
+    width: 20px;
+    height: 14px;
+    border: 1px solid #444;
+    border-radius: 2px;
+}
+
+/* PSG registers */
+.psg-regs {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 2px;
+    margin-top: 4px;
+    font-size: 0.65em;
+    text-align: center;
+}
+
+.psg-regs .pr-hdr { color: #556; }
+.psg-regs .pr-val { color: #8ab; background: #0d1b2a; border-radius: 2px; padding: 1px 0; }
+
+/* Keyboard display */
+.key-display {
+    font-size: 0.75em;
+    color: #aaccee;
+    background: #0d1b2a;
+    border-radius: 3px;
+    padding: 3px 6px;
+    min-height: 1.6em;
+    margin-top: 3px;
+}
+
+/* FM-7 Keyboard Layout */
+.fm7-kbd { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
+.fm7-kbd-row { display: flex; gap: 1px; }
+.fm7-key {
+    background: #1a2a3a; color: #8899aa; border: 1px solid #2a3a4a;
+    border-radius: 3px; font-size: 9px; width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; flex-grow: 0; cursor: default; user-select: none;
+    box-sizing: border-box;
+    padding: 0;
+    overflow: hidden;
+}
+.fm7-key.enter-wide { width: 49px; }
+.fm7-spacer { width: 24px; height: 24px; flex-shrink: 0; flex-grow: 0; }
+/* SPACE: 8 cells wide (8 * 24 + 7 * 1 = 199px) so the following カナ key
+   lands at column 10 — aligned with the `/` key in the row above. */
+.fm7-key.space { width: 199px; }
+
+.fm7-key img.fm7-key-glyph {
+    width: 22px; height: 22px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    pointer-events: none;
+    display: block;
+}
+.fm7-key.active { background: #2a5a8a; color: #fff; border-color: #4ea8de; }
+.fm7-key.ctrl.active, .fm7-key.shift.active { background: #3a6a3a; border-color: #5c5; }
+.fm7-key.led { border-bottom: 2px solid #522; }
+.fm7-key.led.active { border-bottom-color: #e44; }
+.fm7-key.break-key { border-color: #c44; color: #c88; }
+.fm7-key.break-key.active { background: #8a2a2a; border-color: #f66; color: #fff; }
+
+/* Clickable as a software keyboard */
+.fm7-key[data-code], .fm7-key.break-key { cursor: pointer; }
+
+/* Key customization (#188) */
+.fm7-kbd.customizing .fm7-key[data-code] { cursor: pointer; }
+.fm7-kbd.customizing .fm7-key[data-code]:hover { border-color: #4ea8de; }
+.fm7-key.assign-target { background: #7a5a1a; border-color: #e0a93a; color: #fff; }
+.fm7-key.remapped { border-color: #5c5; box-shadow: inset 0 0 0 1px #5c5; }
+.fm7-key.needs-remap { border-style: dashed; border-color: #c4842a; }
+
+/* ===== Site Title ===== */
+.site-title {
+    font-size: 1.3em;
+    color: #4ea8de;
+    text-align: center;
+    margin-top: 12px;
+    margin-bottom: 0;
+    letter-spacing: 0.05em;
+}
+
+/* ===== Footer ===== */
+.footer {
+    font-size: 0.85em;
+    color: #c0c0c0;
+    margin-top: 8px;
+    text-align: center;
+}
+
+.footer a {
+    color: #c0c0c0;
+    text-decoration: underline;
+}
+
+.footer a:hover {
+    color: #ffffff;
+}
+
+.footer-links {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.footer-links a {
+    color: #6688aa;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
+}
+
+.footer-links a:hover {
+    color: #ffffff;
+}
+
+.footer-repo {
+    font-size: 0.85em;
+    margin-left: 4px;
+}
+
+/* ===== Floating Panels (Input Monitor & Debug) ===== */
+.input-panel {
+    display: none;
+    position: fixed;
+    /* Top-left anchored so fitMainLayout()'s transform: scale(...) (with
+       transform-origin: top left) magnifies them cleanly without pushing
+       them off the right/bottom edge. */
+    top: 56px;
+    left: 16px;
+    transform-origin: top left;
+    width: 240px;
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    z-index: 50;
+    font-size: 0.75em;
+}
+
+.input-panel.open { display: block; }
+
+#debugPanel,
+#keyPanel,
+#palPanel,
+#sndPanel {
+    right: auto;
+    width: 336px;
+}
+/* Stagger via `top` only. Setting both top (from .input-panel) and bottom
+   stretches a fixed element to full height on first show; dragging clears
+   bottom (style.bottom='auto') which is why moving "fixed" the size. */
+#debugPanel { left: 16px;  width: 200px; }
+#keyPanel   { left: 48px;  top: 88px;  width: 528px; }
+#palPanel   { left: 80px;  top: 120px; width: 176px; }
+#sndPanel   { left: 112px; top: 152px; }
+
+.draggable-header {
+    cursor: grab;
+    user-select: none;
+}
+
+.draggable-header:active {
+    cursor: grabbing;
+}
+
+/* Analog Palette canvas */
+#analogPaletteCanvas {
+    display: block;
+    margin-top: 4px;
+}
+
+.ip-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    border-bottom: 1px solid #2a2a4a;
+    color: #4ea8de;
+    font-size: 0.9em;
+    font-weight: bold;
+}
+
+.ip-close {
+    background: none;
+    border: none;
+    color: #6688aa;
+    font-size: 1.3em;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+}
+
+.ip-close:hover { color: #fff; }
+
+.ip-body { padding: 8px 10px; }
+
+.ip-section { margin-bottom: 8px; }
+.ip-section:last-child { margin-bottom: 0; }
+
+.ip-label {
+    color: #6688aa;
+    font-size: 0.85em;
+    margin-bottom: 3px;
+}
+
+.ip-sublabel {
+    color: #556;
+    font-size: 0.85em;
+    margin-left: 6px;
+}
+
+.ip-held-keys {
+    color: #aaccee;
+    background: #0d1b2a;
+    border-radius: 3px;
+    padding: 3px 6px;
+    min-height: 1.6em;
+    word-break: break-all;
+    line-height: 1.5;
+}
+
+.ip-fm7key {
+    display: flex;
+    align-items: center;
+}
+
+.ip-fm7key span:first-child {
+    color: #00cc66;
+    background: #0d1b2a;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-family: inherit;
+}
+
+/* Joystick D-pad */
+.ip-joy-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ip-joy-dpad {
+    display: grid;
+    grid-template-columns: 16px 16px 16px;
+    grid-template-rows: 16px 16px 16px;
+    gap: 1px;
+}
+
+.ip-joy-dpad span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+}
+
+.jp-u { grid-column: 2; grid-row: 1; }
+.jp-l { grid-column: 1; grid-row: 2; }
+.jp-c { grid-column: 2; grid-row: 2; background: #0d1b2a; border-radius: 2px; }
+.jp-r { grid-column: 3; grid-row: 2; }
+.jp-d { grid-column: 2; grid-row: 3; }
+
+.jp-u, .jp-d, .jp-l, .jp-r {
+    background: #2a2a4a;
+    border: 1px solid #333;
+}
+
+.jp-u.active, .jp-d.active, .jp-l.active, .jp-r.active {
+    background: #00cc66;
+    border-color: #00ee77;
+}
+
+/* Joystick buttons */
+.ip-joy-btns {
+    display: flex;
+    gap: 4px;
+}
+
+.jp-btn {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #2a2a4a;
+    border: 1px solid #333;
+    border-radius: 50%;
+    color: #6688aa;
+    font-size: 0.8em;
+}
+
+.jp-btn.active {
+    background: #cc4444;
+    border-color: #ee5555;
+    color: #fff;
+}
+
+/* ===== Help Modal ===== */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal-overlay.open {
+    display: flex;
+}
+
+.modal-content {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 28px 32px;
+    max-width: 720px;
+    width: 90vw;
+    max-height: 85vh;
+    overflow-y: auto;
+    position: relative;
+    line-height: 1.7;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+}
+
+.modal-content::-webkit-scrollbar { width: 6px; }
+.modal-content::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+.modal-close {
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    background: none;
+    border: none;
+    color: #6688aa;
+    font-size: 1.6em;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.modal-close:hover { color: #ffffff; }
+
+.modal-content h1 { color: #4ea8de; font-size: 1.4em; margin-bottom: 8px; }
+.modal-content h2 { color: #4ea8de; font-size: 1.1em; margin-top: 24px; border-bottom: 1px solid #2a2a4a; padding-bottom: 4px; }
+.modal-content h3 { color: #6cb8e6; font-size: 0.95em; margin-top: 16px; }
+.modal-content p { margin: 8px 0; }
+.modal-content a { color: #4ea8de; }
+.modal-content a:hover { color: #ffffff; }
+
+.modal-content code {
+    background: #0d1b2a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.modal-content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0;
+    font-size: 0.85em;
+}
+
+.modal-content th,
+.modal-content td {
+    border: 1px solid #2a3a5a;
+    padding: 5px 10px;
+    text-align: left;
+}
+
+.modal-content th { background: #16213e; color: #4ea8de; }
+.modal-content td { background: #0d1b2a; }
+.modal-content ul, .modal-content ol { padding-left: 22px; margin: 8px 0; }
+.modal-content li { margin: 4px 0; }
+
+/* ===== Fullscreen ===== */
+/* Each vendor prefix MUST be a separate rule — an unrecognised selector
+   in a comma list invalidates the entire rule in CSS. */
+
+/* Container: black background + flex centering */
+.screen-container:fullscreen {
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+}
+.screen-container:-webkit-full-screen {
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+}
+.screen-container:-moz-full-screen {
+    background: #000; border: none; border-radius: 0;
+    padding: 0; margin: 0; box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+}
+
+.screen-container:fullscreen::before { display: none; }
+.screen-container:-webkit-full-screen::before { display: none; }
+.screen-container:-moz-full-screen::before { display: none; }
+
+/* Canvas + scanlines: sized by JS (fullscreenchange handler) */
+.screen-container:fullscreen canvas#screen { border-radius: 0; }
+.screen-container:-webkit-full-screen canvas#screen { border-radius: 0; }
+.screen-container:-moz-full-screen canvas#screen { border-radius: 0; }
+
+.screen-container:fullscreen .scanlines { border-radius: 0; }
+.screen-container:-webkit-full-screen .scanlines { border-radius: 0; }
+.screen-container:-moz-full-screen .scanlines { border-radius: 0; }
+
+/* ===== Mobile / Tablet Layout ===== */
+
+/* Mobile action bar — hidden on desktop */
+#mobileBar { display: none; }
+
+/* Drawer overlay — hidden by default */
+.drawer-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 900;
+}
+.drawer-overlay.open { display: block; }
+
+@media (max-width: 1023px), (any-pointer: coarse) {
+    body {
+        min-height: 100dvh;
+        justify-content: flex-start;
+        overscroll-behavior: contain;
+        padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+
+    .site-title {
+        font-size: 1em;
+        margin: 4px 0;
+    }
+
+    .main-layout {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 4px;
+        gap: 4px;
+    }
+
+    .left-col {
+        width: 100%;
+        flex-shrink: 1;
+    }
+
+    .screen-container {
+        padding: 4px;
+        border-width: 2px;
+        border-radius: 6px;
+    }
+    .screen-container::before {
+        top: 2px; left: 2px; right: 2px; bottom: 2px;
+        border-radius: 5px;
+        border-width: 1px;
+    }
+
+    canvas#screen {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 10;
+    }
+
+    .scanlines {
+        top: 4px; left: 4px;
+        width: calc(100% - 8px);
+        height: calc(100% - 8px);
+    }
+
+    /* Toolbar: compact */
+    .toolbar {
+        width: 100%;
+        padding: 4px 6px;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .toolbar-group { gap: 4px; }
+    .toolbar button { font-size: 0.7em; padding: 3px 6px; }
+    .vol-label { font-size: 0.65em; }
+    input[type="range"]#volumeSlider { width: 60px; }
+
+    /* Status bar on narrow screens: keep the two-row stack but let each row
+       wrap and align left so nothing gets pushed off / hidden. */
+    .toolbar-status {
+        align-items: stretch;
+        width: 100%;
+        gap: 4px;
+    }
+    .status-row {
+        justify-content: flex-start;
+        gap: 6px;
+    }
+
+    /* Debug toolbar: hidden on mobile */
+    .toolbar-debug { display: none; }
+
+    /* Side Panel: off-screen drawer */
+    .side-panel {
+        position: fixed;
+        top: 0; left: 0;
+        width: min(320px, 85vw);
+        min-width: 0;
+        height: 100dvh;
+        max-height: 100dvh;
+        z-index: 1000;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        background: #16213e;
+        border-right: 1px solid #446;
+        padding-top: env(safe-area-inset-top, 0);
+    }
+    .side-panel.drawer-open {
+        transform: translateX(0);
+    }
+
+    /* Mobile action bar */
+    #mobileBar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        width: 100%;
+        padding: 4px 8px;
+        background: #16213e;
+        border: 1px solid #333;
+        border-radius: 6px;
+        margin-top: 4px;
+    }
+    #mobileBar button {
+        font-family: inherit;
+        font-size: 1.1em;
+        padding: 6px 14px;
+        border: 1px solid #4a5a7a;
+        border-radius: 6px;
+        cursor: pointer;
+        background: #2a3a5a;
+        color: #c8c8d0;
+        touch-action: manipulation;
+        min-width: 44px;
+        min-height: 44px;
+    }
+    #mobileBar button:active { background: #3a4a6a; }
+    #mobileBar button.active {
+        background: #0a4a2a;
+        color: #00ee77;
+        border-color: #00cc66;
+    }
+
+    /* Mobile power switch (compact replica of .power-switch) */
+    .mobile-power-switch {
+        display: inline-flex; align-items: center; gap: 3px;
+        cursor: pointer; user-select: none; flex-shrink: 0;
+    }
+    .mobile-power-switch input { display: none; }
+    .mps-label { font-size: 0.65em; font-weight: bold; line-height: 1; }
+    .mps-label:first-of-type { color: #c66; }
+    .mps-label:last-of-type { color: #565; }
+    .mobile-power-switch input:checked ~ .mps-label:first-of-type { color: #544; }
+    .mobile-power-switch input:checked ~ .mps-label:last-of-type { color: #0e7; }
+    .mps-track {
+        position: relative; display: block;
+        width: 36px; height: 18px;
+        background: linear-gradient(180deg, #111, #222 40%, #1a1a1a);
+        border: 2px solid #444; border-radius: 4px;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+        transition: border-color 0.2s;
+    }
+    .mps-knob {
+        position: absolute; top: 1px; left: 1px;
+        width: 14px; height: 14px; border-radius: 3px;
+        background: linear-gradient(180deg, #bbb, #888 40%, #999);
+        border: 1px solid #aaa;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.6);
+        transition: left 0.2s, background 0.2s;
+    }
+    .mobile-power-switch input:checked ~ .mps-track {
+        border-color: #0a5;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.6), 0 0 6px rgba(0,204,102,0.3);
+    }
+    .mobile-power-switch input:checked ~ .mps-track .mps-knob {
+        left: 19px;
+        background: linear-gradient(180deg, #5fa, #0b6 40%, #0d7);
+        border-color: #0e7;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.5), 0 0 8px rgba(0,238,119,0.5);
+    }
+
+    /* Footer: relocated into drawer via JS — shrink for panel width */
+    .footer {
+        font-size: 0.7em;
+        padding: 8px;
+        margin-top: auto;
+        border-top: 1px solid #334;
+    }
+    .footer-links { flex-wrap: wrap; gap: 4px; }
+
+    /* === Side-panel: touch-friendly buttons (#201) ===
+       Apple HIG calls for a 44pt minimum tappable area, so keep min-height at
+       44px but use a modest font/padding so buttons are not visually bulky. */
+    .side-panel button {
+        min-height: 44px;
+        font-size: 0.8em;
+        padding: 4px 12px;
+        touch-action: manipulation;
+    }
+
+    /* File-input rows: input takes a full line, buttons sit on the next row at
+       their natural width (44px tall) — nothing gets clipped. */
+    .sp-row { gap: 8px; }
+    .sp-row > input[type="file"] { flex-basis: 100%; }
+    .sp-row > button { flex: 0 0 auto; }
+
+    /* Control button row wraps so Pause / Reset / 📷 never overflow. */
+    .side-panel .btn-row { flex-wrap: wrap; gap: 8px; }
+
+    /* Larger, easier-to-tap file pickers in the panel. */
+    .side-panel input[type="file"] {
+        font-size: 0.9em;
+        padding: 6px 6px;
+    }
+    .side-panel input[type="file"]::file-selector-button {
+        padding: 6px 10px;
+        font-size: 0.95em;
+    }
+
+    /* Roomier collapsible section headers (easier to tap to expand/collapse) */
+    .side-panel .sp-section h3.sp-section-toggle {
+        font-size: 0.95em;
+        padding: 6px 16px 6px 0;
+    }
+
+    /* ROM file rows stack so the long file picker is fully usable. */
+    .rom-item { flex-wrap: wrap; }
+    .rom-item .rom-name { min-width: 0; flex-basis: 100%; }
+    .rom-item input[type="file"] { flex: 1 1 auto; }
+
+    /* === Side-panel form controls: touch-friendly (#201) === */
+
+    /* Dropdowns: full 44px touch height and readable text.
+       !important overrides the inline font-size on individual <select>s. */
+    .side-panel select {
+        min-height: 44px;
+        font-size: 0.95em !important;
+        padding: 4px 8px;
+        touch-action: manipulation;
+    }
+
+    /* Checkboxes & radios: larger hit target. */
+    .side-panel input[type="checkbox"],
+    .side-panel input[type="radio"] {
+        width: 22px;
+        height: 22px;
+        flex-shrink: 0;
+        touch-action: manipulation;
+    }
+
+    /* Give the label wrapping each radio/checkbox a generous tap area and
+       spacing so adjacent options are not easy to mis-tap. */
+    .side-panel .ctrl-row {
+        gap: 10px;
+        min-height: 40px;
+        white-space: normal;
+    }
+    .side-panel .ctrl-row > label:first-child,
+    .side-panel .sp-section > label {
+        font-size: 0.9em;
+    }
+    .side-panel .radio-group {
+        flex-wrap: wrap;
+        gap: 8px 16px;
+    }
+    .side-panel .radio-group label {
+        font-size: 0.95em;
+        gap: 6px;
+        padding: 6px 4px;
+        min-height: 40px;
+    }
+
+    /* Range sliders (volume): taller track / thumb for easier dragging. */
+    .side-panel input[type="range"] {
+        height: 28px;
+        touch-action: manipulation;
+    }
+
+    /* Generous spacing between buttons across all panel rows so taps don't
+       land on the wrong control. */
+    .side-panel .sp-row { gap: 10px; row-gap: 10px; flex-wrap: wrap; }
+    .side-panel .sp-row > button,
+    .side-panel .btn-row > button { flex: 0 0 auto; }
+
+    /* Larger, easier-to-tap help (?) icon and required/optional badges. */
+    .side-panel .sp-section h3 .help-icon {
+        width: 24px; height: 24px; line-height: 24px; font-size: 14px;
+    }
+    .rom-badge { font-size: 0.72rem; padding: 1px 6px; }
+
+    /* Slightly larger guidance text for legibility on small screens. */
+    .rom-guide, .sp-guide, .save-note, .rec-label { font-size: 0.78rem; }
+
+    /* Library list: roomier rows and bigger per-item action buttons so the
+       tiny ▶0 / Exp / Del controls become tappable (44px target). */
+    #libList { max-height: 40vh; font-size: 0.85em; }
+    #libList .lib-row { gap: 6px; padding: 6px 2px; flex-wrap: wrap; }
+    #libList .lib-row button {
+        min-height: 40px;
+        min-width: 40px;
+        font-size: 0.9em !important;
+        padding: 4px 8px !important;
+        touch-action: manipulation;
+    }
+
+    /* ROM Info copy button stays tappable. */
+    #romInfoCopyBtn { min-height: 36px; padding: 2px 10px; }
+}
+
+/* ===== Narrow phone width: icon-forward, low-text buttons =====
+   On small phones, primary media buttons (record / play / rewind / save /
+   eject / paste-stop) collapse to their glyph to save space and grow the tap
+   target. Every such button keeps title + aria-label so meaning is preserved.
+   Desktop and tablet keep the text labels untouched. */
+@media (max-width: 560px) {
+    .side-panel button .btn-icon {
+        display: inline;
+        font-size: 1.35em;
+        line-height: 1;
+    }
+    .side-panel button .btn-text { display: none; }
+
+    /* Icon-only buttons become square-ish, large tap targets. */
+    .side-panel .sp-row > button:has(.btn-icon),
+    .side-panel .btn-row > button:has(.btn-icon) {
+        min-width: 52px;
+        min-height: 48px;
+        padding: 4px 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Recording row: keep the small Japanese caption above the icon buttons
+       so the user still knows these act on the recording. */
+    .rec-label { font-size: 0.82rem; }
+}

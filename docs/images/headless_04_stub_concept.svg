@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 420" width="840" height="420">
+  <title>ブラウザ API スタブの概念図。コアが触る API をニセモノが受け止める</title>
+  <defs>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="840" height="420" fill="#ffffff"/>
+  <text x="420" y="30" font-family="sans-serif" font-size="18" font-weight="bold" fill="#1f2328" text-anchor="middle">ブラウザ API スタブ ― コアが触る API をニセモノが受け止める</text>
+
+  <!-- コア -->
+  <rect x="40" y="140" width="190" height="130" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="135" y="180" font-family="sans-serif" font-size="16" font-weight="bold" fill="#1a7f37" text-anchor="middle">core/</text>
+  <text x="135" y="205" font-family="sans-serif" font-size="13" fill="#1f2328" text-anchor="middle">エミュレータ本体</text>
+  <text x="135" y="226" font-family="sans-serif" font-size="12" fill="#57606a" text-anchor="middle">一部でブラウザの</text>
+  <text x="135" y="243" font-family="sans-serif" font-size="12" fill="#57606a" text-anchor="middle">グローバル API を参照</text>
+  <text x="135" y="295" font-family="sans-serif" font-size="12" fill="#bc4c00" text-anchor="middle">※ スタブは import より前に設置</text>
+
+  <!-- スタブ容器 -->
+  <rect x="320" y="60" width="490" height="330" rx="8" fill="#fbefff" stroke="#8250df" stroke-width="1.5" stroke-dasharray="8,5"/>
+  <text x="565" y="88" font-family="sans-serif" font-size="15" font-weight="bold" fill="#8250df" text-anchor="middle">スタブ（globalThis に置く最小限のニセモノ）</text>
+
+  <rect x="350" y="104" width="430" height="44" rx="8" fill="#ffffff" stroke="#8250df"/>
+  <text x="370" y="123" font-family="monospace" font-size="13" font-weight="bold" fill="#1f2328">document / window</text>
+  <text x="370" y="140" font-family="sans-serif" font-size="12" fill="#57606a">addEventListener などを空実装で受け止める</text>
+
+  <rect x="350" y="158" width="430" height="44" rx="8" fill="#ffffff" stroke="#8250df"/>
+  <text x="370" y="177" font-family="monospace" font-size="13" font-weight="bold" fill="#1f2328">AudioContext</text>
+  <text x="370" y="194" font-family="sans-serif" font-size="12" fill="#57606a">音は鳴らさない。空のクラスで受け止める</text>
+
+  <rect x="350" y="212" width="430" height="44" rx="8" fill="#ffffff" stroke="#8250df"/>
+  <text x="370" y="231" font-family="monospace" font-size="13" font-weight="bold" fill="#1f2328">requestAnimationFrame / cancelAnimationFrame</text>
+  <text x="370" y="248" font-family="sans-serif" font-size="12" fill="#57606a">ダミーで可（ヘッドレスでは自分で exec() を回すため）</text>
+
+  <rect x="350" y="266" width="430" height="44" rx="8" fill="#fff1e5" stroke="#bc4c00" stroke-width="1.5"/>
+  <text x="370" y="285" font-family="monospace" font-size="13" font-weight="bold" fill="#bc4c00">performance.now()</text>
+  <text x="370" y="302" font-family="sans-serif" font-size="12" fill="#bc4c00">ここだけ例外: 必ず「実時間」を返すこと</text>
+
+  <text x="370" y="336" font-family="sans-serif" font-size="12" fill="#bc4c00">固定値（() =&gt; 0 など）にするとキー入力が動かず、</text>
+  <text x="370" y="353" font-family="sans-serif" font-size="12" fill="#bc4c00">BASIC がキー待ちのまま固まります。Node.js 標準の</text>
+  <text x="370" y="370" font-family="sans-serif" font-size="12" fill="#bc4c00">performance をそのまま生かすのが安全です。</text>
+
+  <!-- 矢印 -->
+  <line x1="230" y1="160" x2="346" y2="126" stroke="#57606a" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="230" y1="185" x2="346" y2="180" stroke="#57606a" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="230" y1="210" x2="346" y2="234" stroke="#57606a" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="230" y1="235" x2="346" y2="288" stroke="#57606a" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="278" y="115" font-family="sans-serif" font-size="13" fill="#57606a" text-anchor="middle">参照</text>
+</svg>
